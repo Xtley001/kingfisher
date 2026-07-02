@@ -1,0 +1,75 @@
+@import '@fontsource/jetbrains-mono/300.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/600.css';
+@import '@fontsource/jetbrains-mono/700.css';
+
+:root {
+  /* Base — near-black, subtle olive undertone */
+  --bg-void:      #080a08;
+  --bg-primary:   #0c0f0c;
+  --bg-secondary: #111411;
+  --bg-tertiary:  #161a16;
+  --bg-raised:    #1c211c;
+
+  /* Olive accents */
+  --olive-dim:    #3d4a2e;
+  --olive-mid:    #5a6e3f;
+  --olive-bright: #7a9a4a;
+  --olive-text:   #a8c470;
+  --olive-glow:   rgba(122, 154, 74, 0.10);
+
+  /* Grey scale */
+  --grey-800: #1c211c;
+  --grey-700: #2a302a;
+  --grey-600: #3a423a;
+  --grey-500: #505850;
+  --grey-400: #6e786e;
+  --grey-300: #8a968a;
+  --grey-200: #b0bcb0;
+
+  /* Glass */
+  --glass-bg:         rgba(255,255,255,0.025);
+  --glass-bg-hover:   rgba(255,255,255,0.042);
+  --glass-border:     rgba(255,255,255,0.062);
+  --glass-border-lit: rgba(122,154,74,0.28);
+  --glass-blur:       blur(14px);
+
+  /* Semantic */
+  --green-bg:   rgba(74,124,78,0.12);
+  --green-text: #72b878;
+  --red-bg:     rgba(124,58,58,0.12);
+  --red-text:   #d47272;
+  --amber-bg:   rgba(124,94,42,0.12);
+  --amber-text: #d4a472;
+
+  /* Text */
+  --text-primary:   rgba(212,220,212,0.92);
+  --text-secondary: rgba(180,192,180,0.55);
+  --text-muted:     rgba(150,165,150,0.30);
+
+  /* Font — mono only */
+  --font: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+
+  /* Shape — sharp, structural */
+  --r-xs: 2px;
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1.55;
+  background: var(--bg-void);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  margin: 0;
+}
+
+::-webkit-scrollbar       { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--bg-primary); }
+::-webkit-scrollbar-thumb { background: var(--grey-600); border-radius: 2px; }

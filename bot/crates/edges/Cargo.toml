@@ -1,0 +1,16 @@
+[package]
+name    = "kingfisher-edges"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kingfisher-core       = { path = "../core" }
+kingfisher-simulation = { path = "../simulation" }
+alloy.workspace       = true
+tokio.workspace       = true
+anyhow.workspace      = true
+tracing.workspace     = true
+serde.workspace       = true
+futures.workspace     = true
+uuid.workspace        = true
+chrono.workspace      = true

@@ -1,0 +1,30 @@
+[profile.default]
+src      = "src"
+out      = "out"
+libs     = ["lib"]
+exclude  = ["lib/openzeppelin-contracts/fv"]
+remappings = [
+    "forge-std/=lib/forge-std/src/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+]
+solc     = "0.8.24"
+optimizer        = true
+optimizer_runs   = 1_000_000
+via_ir           = true
+ffi              = false
+
+[profile.default.fuzz]
+runs = 10_000
+
+# NOTE: These named endpoints are only used if you pass --fork-url arbitrum_one (etc.)
+# The commands in README.md and TESTING.md use --fork-url $RPC_HTTP_URL directly,
+# so this block is not exercised by those commands. The env var must still be
+# exported to the shell (via set -a && source .env.testnet && set +a) for
+# the [etherscan] block below to resolve correctly.
+[rpc_endpoints]
+arbitrum_one     = "${RPC_HTTP_URL}"
+arbitrum_sepolia = "${RPC_HTTP_URL}"
+
+[etherscan]
+arbitrum_one     = { key = "${ARBISCAN_KEY}", url = "https://api.etherscan.io/v2/api?chainid=42161" }
+arbitrum_sepolia = { key = "${ARBISCAN_KEY}", url = "https://api.etherscan.io/v2/api?chainid=421614" }

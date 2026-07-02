@@ -1,0 +1,13 @@
+[package]
+name    = "kingfisher-simulation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kingfisher-core = { path = "../core" }
+alloy.workspace = true
+rayon.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+hex.workspace = true

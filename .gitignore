@@ -1,0 +1,42 @@
+# Environment files — NEVER commit real credentials
+.env
+.env.mainnet
+.env.testnet
+*.env
+
+# Rust build artifacts
+target/
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node / dashboard
+node_modules/
+dist/
+.vercel/
+
+# Foundry build artifacts
+contracts/out/
+contracts/cache/
+
+# Local dev
+*.log
+
+# Runtime
+data/
+
+# Dashboard local env
+dashboard/.env.local
+
+# Foundry deps (forge install)
+contracts/lib/
+
+# Lockfile backups
+Cargo.lock.bak
+
+# Local review/working notes — not part of the shipped repo
+UPDATE.md

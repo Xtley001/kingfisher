@@ -1,0 +1,46 @@
+# Kingfisher — systemd unit for bare-metal deployment.
+#
+# Install:
+#   sudo cp deploy/kingfisher.service /etc/systemd/system/kingfisher.service
+#   sudo mkdir -p /etc/kingfisher /var/lib/kingfisher
+#   sudo cp .env.mainnet /etc/kingfisher/kingfisher.env   # secrets live here, root-only
+#   sudo chmod 600 /etc/kingfisher/kingfisher.env
+#   sudo cp bot/target/release/kingfisher /usr/local/bin/kingfisher
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now kingfisher
+#   journalctl -u kingfisher -f
+#
+# Build the binary (with co-located Nitro IPC support) first:
+#   cd bot && cargo build --release --features ipc
+
+[Unit]
+Description=Kingfisher — Arbitrum Curve stablecoin arbitrage bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kingfisher
+Group=kingfisher
+# Secrets and parameters (BOT_PRIVATE_KEY, RPC URLs, etc.). Root-readable only.
+EnvironmentFile=/etc/kingfisher/kingfisher.env
+ExecStart=/usr/local/bin/kingfisher
+# Persistent params.json + trade history live here (matches the /data path used in code).
+WorkingDirectory=/var/lib/kingfisher
+Restart=on-failure
+RestartSec=2
+# Do not let a crash loop hammer the sequencer.
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+# ── Hardening ──────────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/kingfisher
+# The IPC socket path, if used, must be reachable — adjust if your Nitro node
+# places it outside /tmp (PrivateTmp isolates /tmp, so use e.g. /run/nitro/arb.ipc).
+
+[Install]
+WantedBy=multi-user.target

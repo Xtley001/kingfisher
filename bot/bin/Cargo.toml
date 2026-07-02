@@ -1,0 +1,32 @@
+[package]
+name    = "kingfisher"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "kingfisher"
+path = "src/main.rs"
+
+[dependencies]
+kingfisher-core       = { path = "../crates/core" }
+kingfisher-chain      = { path = "../crates/chain" }
+kingfisher-api        = { path = "../crates/api" }
+kingfisher-scanner    = { path = "../crates/scanner" }
+kingfisher-simulation = { path = "../crates/simulation" }
+kingfisher-edges      = { path = "../crates/edges" }
+kingfisher-executor   = { path = "../crates/executor" }
+tokio.workspace              = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true
+anyhow.workspace             = true
+dotenvy.workspace            = true
+serde.workspace              = true
+alloy.workspace              = true
+uuid.workspace               = true
+chrono.workspace             = true
+
+[features]
+default = []
+# Enables the co-located Nitro node IPC transport in kingfisher-chain (~0.1ms block
+# latency). Build with: cargo build --release --features ipc
+ipc = ["kingfisher-chain/ipc"]

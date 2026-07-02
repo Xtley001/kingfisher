@@ -1,0 +1,11 @@
+{
+  "name": "Kingfisher",
+  "short_name": "Kingfisher",
+  "description": "Stablecoin Curve Arbitrage Dashboard",
+  "theme_color": "#0c0f0c",
+  "background_color": "#080a08",
+  "display": "standalone",
+  "orientation": "any",
+  "start_url": "/",
+  "icons": []
+}

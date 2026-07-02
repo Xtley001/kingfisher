@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-unit:
+    name: Rust unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bot
+      - name: Unit tests
+        run: cd bot && cargo test --all
+      - name: Clippy
+        run: cd bot && cargo clippy -- -D warnings
+
+  contracts-build:
+    name: Foundry build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Install deps
+        run: |
+          cd contracts
+          forge install foundry-rs/forge-std --no-git
+          forge install aave/aave-v3-core --no-git
+          forge install OpenZeppelin/openzeppelin-contracts --no-git
+      - name: Build
+        run: cd contracts && forge build
+
+  contracts-fork-test:
+    name: Foundry fork tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'   # only on push — fork tests need the secret
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Install deps
+        run: |
+          cd contracts
+          forge install foundry-rs/forge-std --no-git
+          forge install aave/aave-v3-core --no-git
+          forge install OpenZeppelin/openzeppelin-contracts --no-git
+      - name: Fork tests
+        env:
+          RPC_HTTP_URL: ${{ secrets.ARBITRUM_RPC_URL }}
+          ARBISCAN_KEY: ${{ secrets.ARBISCAN_KEY }}
+        run: |
+          if [ -z "$RPC_HTTP_URL" ]; then
+            echo "::notice::ARBITRUM_RPC_URL secret not set — skipping fork tests. Add it in Settings → Secrets and variables → Actions to enable."
+            exit 0
+          fi
+          cd contracts && forge test --fork-url "$RPC_HTTP_URL" -vv

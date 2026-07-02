@@ -1,0 +1,15 @@
+[package]
+name    = "kingfisher-scanner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kingfisher-core       = { path = "../core" }
+kingfisher-simulation = { path = "../simulation" }
+alloy.workspace       = true
+rayon.workspace       = true
+anyhow.workspace      = true
+tracing.workspace     = true
+serde.workspace       = true
+chrono.workspace      = true
+uuid.workspace        = true
