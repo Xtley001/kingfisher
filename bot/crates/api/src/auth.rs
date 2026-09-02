@@ -6,6 +6,11 @@ use axum::{
 };
 use crate::SharedState;
 
+/// Constant-time comparison between two string secrets to prevent timing attacks.
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// Middleware: require X-Api-Key header on all protected routes.
 /// Constant-time comparison prevents timing attacks.
 pub async fn require_api_key(
@@ -27,11 +32,7 @@ pub async fn require_api_key(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    // Constant-time comparison (prevent timing oracle)
-    let matches = provided.len() == api_key.len()
-        && provided.bytes().zip(api_key.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
-
-    if !matches {
+    if !constant_time_eq(provided, &api_key) {
         tracing::warn!(
             ip = ?req.headers().get("x-forwarded-for"),
             "Unauthorized API access attempt"

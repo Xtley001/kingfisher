@@ -42,6 +42,25 @@ pub enum RevertClass {
 
 impl RevertClass {
     pub fn from_reason(reason: &str) -> Self {
+        // Decode 4-byte custom error selectors if present (e.g. from on-chain revert data)
+        let trimmed = reason.trim().trim_start_matches("0x");
+        if trimmed.len() >= 8 {
+            if let Ok(bytes) = alloy::hex::decode(&trimmed[..8]) {
+                let sel: &[u8] = &bytes;
+                if sel == &alloy::primitives::keccak256("ProfitBelowMin(uint256,uint256)")[..4] {
+                    return Self::ProfitBelowMin;
+                } else if sel == &alloy::primitives::keccak256("PoolNotAllowed(address)")[..4] {
+                    return Self::PoolNotAllowed;
+                } else if sel == &alloy::primitives::keccak256("PoolUnhealthy(address)")[..4] {
+                    return Self::PoolUnhealthy;
+                } else if sel == &alloy::primitives::keccak256("ZeroInputAtHop(uint256)")[..4] {
+                    return Self::ZeroInput;
+                } else if sel == &alloy::primitives::keccak256("ZeroMinAmountOut(uint256)")[..4] {
+                    return Self::SlippageGuard;
+                }
+            }
+        }
+
         let r = reason.to_lowercase();
         if r.contains("profit below min") || r.contains("kf: profit") {
             Self::ProfitBelowMin
@@ -119,8 +138,9 @@ pub struct BotState {
     pub pending_opportunities: std::collections::HashMap<String, Opportunity>,
 
     // Gas
-    pub wallet_eth_balance: f64,
-    pub gas_regime:         GasRegime,
+    pub wallet_eth_balance:  f64,
+    pub total_gas_spent_usd: f64,
+    pub gas_regime:          GasRegime,
 
     // Live tunable parameters
     pub params: BotParams,
@@ -138,6 +158,14 @@ pub struct BotState {
     // Local nonce cache — prevents concurrent submissions from racing on the same nonce.
     // None = not yet initialised; refreshed from chain after any nonce-related revert.
     pub local_nonce: Option<u64>,
+
+    // Timeboost vs standard express lane routing & landing metrics
+    pub timeboost_routed_count: u64,
+    pub standard_routed_count:  u64,
+    pub timeboost_landed_count: u64,
+    pub standard_landed_count:  u64,
+    pub recent_race_losses:     VecDeque<bool>,
+    pub timeboost_tx_hashes:    std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -177,6 +205,7 @@ impl BotState {
             pending_bundle_hashes: Vec::new(),
             pending_opportunities: std::collections::HashMap::new(),
             wallet_eth_balance: 0.0,
+            total_gas_spent_usd: 0.0,
             gas_regime: GasRegime::Normal,
             params,
             recent_opps: VecDeque::with_capacity(100),
@@ -184,6 +213,12 @@ impl BotState {
             pool_states: HashMap::new(),
             pending_withdrawal: false,
             local_nonce: None,
+            timeboost_routed_count: 0,
+            standard_routed_count: 0,
+            timeboost_landed_count: 0,
+            standard_landed_count: 0,
+            recent_race_losses: VecDeque::with_capacity(30),
+            timeboost_tx_hashes: std::collections::HashSet::new(),
         }
     }
 
@@ -246,6 +281,15 @@ impl BotState {
         self.recent_txs.push_back(result);
     }
 
+    /// Calculate the fraction of recent outcomes that were race losses (0.0 to 1.0).
+    pub fn recent_race_loss_rate(&self) -> f64 {
+        if self.recent_race_losses.is_empty() {
+            return 0.0;
+        }
+        let losses = self.recent_race_losses.iter().filter(|&&loss| loss).count();
+        losses as f64 / self.recent_race_losses.len() as f64
+    }
+
     /// Register a bundle as pending on-chain confirmation.
     /// Also stores the real Opportunity so divergence validation can use it
     /// instead of a synthetic zero-address stub.
@@ -259,11 +303,99 @@ impl BotState {
         self.pending_opportunities.remove(tx_hash);
     }
 
-    /// Called by the landing tracker when a receipt is confirmed.
-    pub fn confirm_trade_landed(&mut self, _landed_block: u64, profit: f64) {
-        // Credit on-chain confirmed profit separately for accurate accounting.
-        // today_profit_usd was already credited on bundle acceptance; no double-add.
-        tracing::info!(profit, "✅ On-chain confirmed profit");
+    /// Called by the landing tracker when an on-chain receipt is confirmed as successful (status == 1).
+    /// Authoritatively records profit, trade counts, gas spent, and updates recent transactions.
+    pub fn confirm_trade_landed(
+        &mut self,
+        tx_hash: &str,
+        landed_block: u64,
+        actual_profit_usd: f64,
+        gas_used: u64,
+        gas_cost_usd: f64,
+    ) -> TransactionResult {
+        self.total_gas_spent_usd += gas_cost_usd;
+
+        if self.timeboost_tx_hashes.remove(tx_hash) {
+            self.timeboost_landed_count += 1;
+        } else {
+            self.standard_landed_count += 1;
+        }
+
+        if self.recent_race_losses.len() >= 20 {
+            self.recent_race_losses.pop_front();
+        }
+        self.recent_race_losses.push_back(false);
+
+        let res = TransactionResult {
+            id: tx_hash.to_string(),
+            block_target: landed_block,
+            block_landed: Some(landed_block),
+            tx_hash: Some(tx_hash.to_string()),
+            success: true,
+            profit_usd: Some(actual_profit_usd),
+            gas_used: Some(gas_used),
+            revert_reason: None,
+            submitted_at: Utc::now(),
+        };
+
+        self.push_tx_result(res.clone());
+        tracing::info!(actual_profit_usd, gas_cost_usd, landed_block, tx_hash, "✅ On-chain confirmed trade landed");
+        res
+    }
+
+    /// Called by the landing tracker when an on-chain transaction reverted (status == 0).
+    /// Records failure, classifies revert, trips circuit breaker if not a race loss, and tracks gas spent.
+    pub fn confirm_trade_reverted(
+        &mut self,
+        tx_hash: &str,
+        landed_block: u64,
+        reason: Option<String>,
+        gas_used: u64,
+        gas_cost_usd: f64,
+    ) -> TransactionResult {
+        self.total_gas_spent_usd += gas_cost_usd;
+        self.timeboost_tx_hashes.remove(tx_hash);
+
+        let is_race_loss = reason.as_deref().map(RevertClass::from_reason) == Some(RevertClass::ProfitBelowMin);
+        if self.recent_race_losses.len() >= 20 {
+            self.recent_race_losses.pop_front();
+        }
+        self.recent_race_losses.push_back(is_race_loss);
+
+        let res = TransactionResult {
+            id: tx_hash.to_string(),
+            block_target: landed_block,
+            block_landed: Some(landed_block),
+            tx_hash: Some(tx_hash.to_string()),
+            success: false,
+            profit_usd: Some(0.0),
+            gas_used: Some(gas_used),
+            revert_reason: reason,
+            submitted_at: Utc::now(),
+        };
+
+        self.push_tx_result(res.clone());
+        tracing::warn!(gas_cost_usd, landed_block, tx_hash, "❌ On-chain transaction reverted");
+        res
+    }
+
+    /// Called when a pending bundle expires without on-chain inclusion.
+    pub fn confirm_trade_dropped(&mut self, tx_hash: &str, target_block: u64) -> TransactionResult {
+        let res = TransactionResult {
+            id: tx_hash.to_string(),
+            block_target: target_block,
+            block_landed: None,
+            tx_hash: Some(tx_hash.to_string()),
+            success: false,
+            profit_usd: Some(0.0),
+            gas_used: None,
+            revert_reason: Some("Bundle expired (not included)".into()),
+            submitted_at: Utc::now(),
+        };
+
+        self.push_tx_result(res.clone());
+        tracing::debug!(tx_hash, target_block, "Bundle not included (expired)");
+        res
     }
 
     /// Call once per block. Resets today_* counters at UTC midnight and logs yesterday's totals.
@@ -377,5 +509,54 @@ mod tests {
         assert_eq!(s.gas_regime, GasRegime::Alert);
         s.wallet_eth_balance = 0.05; s.update_gas_regime();
         assert_eq!(s.gas_regime, GasRegime::Critical);
+    }
+
+    #[test]
+    fn test_custom_error_selector_decoding() {
+        // ProfitBelowMin(uint256,uint256) selector
+        let sel = alloy::primitives::keccak256("ProfitBelowMin(uint256,uint256)");
+        let hex_err = format!("0x{}", alloy::hex::encode(&sel[..4]));
+        let class = RevertClass::from_reason(&hex_err);
+        assert_eq!(class, RevertClass::ProfitBelowMin);
+        assert!(class.is_race_loss());
+
+        // PoolNotAllowed(address) selector
+        let sel2 = alloy::primitives::keccak256("PoolNotAllowed(address)");
+        let hex_err2 = format!("0x{}", alloy::hex::encode(&sel2[..4]));
+        let class2 = RevertClass::from_reason(&hex_err2);
+        assert_eq!(class2, RevertClass::PoolNotAllowed);
+        assert!(class2.is_critical());
+    }
+
+    #[test]
+    fn test_confirm_trade_landed_accounting() {
+        let mut s = state();
+        assert_eq!(s.total_trades, 0);
+        assert_eq!(s.total_profit_usd, 0.0);
+        assert_eq!(s.total_gas_spent_usd, 0.0);
+
+        let res = s.confirm_trade_landed("0xabc", 100, 42.5, 300_000, 1.25);
+        assert!(res.success);
+        assert_eq!(res.profit_usd, Some(42.5));
+        assert_eq!(s.total_trades, 1);
+        assert_eq!(s.today_trades, 1);
+        assert_eq!(s.total_profit_usd, 42.5);
+        assert_eq!(s.today_profit_usd, 42.5);
+        assert_eq!(s.total_gas_spent_usd, 1.25);
+        assert_eq!(s.consecutive_reverts, 0);
+        assert_eq!(s.recent_txs.len(), 1);
+    }
+
+    #[test]
+    fn test_confirm_trade_reverted_accounting() {
+        let mut s = state();
+        let res = s.confirm_trade_reverted("0xdef", 101, Some("pool not allowed".into()), 250_000, 0.85);
+        assert!(!res.success);
+        assert_eq!(s.total_trades, 0);
+        assert_eq!(s.total_reverts, 1);
+        assert_eq!(s.error_reverts, 1);
+        assert_eq!(s.consecutive_reverts, 1);
+        assert_eq!(s.total_gas_spent_usd, 0.85);
+        assert_eq!(s.total_profit_usd, 0.0);
     }
 }

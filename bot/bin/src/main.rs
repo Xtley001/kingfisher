@@ -167,56 +167,93 @@ async fn main() -> Result<()> {
                     match provider.get_transaction_receipt(tx_hash).await {
                         Ok(Some(receipt)) => {
                             let landed = receipt.block_number.unwrap_or(0);
+                            let gas_used = receipt.gas_used;
+                            let eff_gas_price = receipt.effective_gas_price;
+                            let eth_price = s.read().await.eth_price_usd;
+                            let gas_cost_usd = (gas_used as f64 * eff_gas_price as f64 / 1e18) * eth_price;
 
-                            // Authoritative P&L: decode the contract's own ArbExecuted event.
-                            // Profit accrues INSIDE the KingfisherArb contract (withdrawn later to
-                            // the cold wallet), so summing token transfers to the bot wallet is wrong.
-                            // event ArbExecuted(address indexed flashToken, uint256 flashAmount,
-                            //                   uint256 aavePremium, uint256 netProfit, uint256 hopsCount)
-                            // netProfit is the 3rd non-indexed word (data[64..96]), in flash-token wei.
-                            let contract_addr = network.kingfisher_contract();
-                            let arb_topic = alloy::primitives::keccak256(
-                                "ArbExecuted(address,uint256,uint256,uint256,uint256)".as_bytes()
-                            );
-                            let actual_profit_usd: f64 = receipt.inner.logs().iter()
-                                .filter(|log| {
-                                    log.address() == contract_addr
-                                        && log.topics().first() == Some(&arb_topic)
-                                })
-                                .map(|log| {
-                                    let data = log.data().data.as_ref();
-                                    if data.len() >= 96 {
-                                        let raw = u128::from_be_bytes(data[80..96].try_into().unwrap_or([0u8;16]));
-                                        raw as f64 / 1e6 // stablecoin flash token, 6 decimals
-                                    } else { 0.0 }
-                                })
-                                .sum();
+                            if receipt.status() {
+                                // Authoritative P&L: decode the contract's own ArbExecuted event.
+                                let contract_addr = network.kingfisher_contract();
+                                let arb_topic = alloy::primitives::keccak256(
+                                    "ArbExecuted(address,uint256,uint256,uint256,uint256)".as_bytes()
+                                );
+                                let actual_profit_usd: f64 = receipt.inner.logs().iter()
+                                    .filter(|log| {
+                                        log.address() == contract_addr
+                                            && log.topics().first() == Some(&arb_topic)
+                                    })
+                                    .map(|log| {
+                                        let data = log.data().data.as_ref();
+                                        if data.len() >= 96 {
+                                            let raw = u128::from_be_bytes(data[80..96].try_into().unwrap_or([0u8;16]));
+                                            raw as f64 / 1e6 // stablecoin flash token, 6 decimals
+                                        } else { 0.0 }
+                                    })
+                                    .sum();
 
-                            // Use the event-derived profit; fall back to sim if the log is absent.
-                            let reported_profit = if actual_profit_usd > 0.0 {
-                                actual_profit_usd
+                                // Never fall back to sim_profit when ArbExecuted event is absent
+                                let reported_profit = actual_profit_usd;
+                                if reported_profit == 0.0 {
+                                    tracing::warn!(tx_hash = %hash, "No ArbExecuted event in receipt — profit recorded as 0.0");
+                                }
+
+                                tracing::info!(
+                                    tx_hash       = %hash,
+                                    landed_block  = landed,
+                                    target_block  = target,
+                                    sim_profit,
+                                    actual_profit = reported_profit,
+                                    gas_cost_usd,
+                                    "✅ Bundle confirmed on-chain"
+                                );
+                                kingfisher_api::metrics::OPPS_LANDED.inc();
+                                kingfisher_api::metrics::PROFIT_ACTUAL.inc_by(reported_profit);
+
+                                let confirmed_tx = s.write().await.confirm_trade_landed(
+                                    hash,
+                                    landed,
+                                    reported_profit,
+                                    gas_used,
+                                    gas_cost_usd,
+                                );
+                                kingfisher_api::persistence::append_trade(&confirmed_tx);
+
+                                if reported_profit > 0.0 {
+                                    let hash_clone = hash.clone();
+                                    tokio::spawn(async move {
+                                        kingfisher_api::alerts::alert_trade_executed(reported_profit, &hash_clone, landed).await;
+                                    });
+                                }
                             } else {
-                                tracing::debug!(tx_hash = %hash, "No ArbExecuted event in receipt — using sim_profit as fallback");
-                                *sim_profit
-                            };
+                                // On-chain revert (status == 0)
+                                tracing::warn!(
+                                    tx_hash      = %hash,
+                                    landed_block = landed,
+                                    target_block = target,
+                                    gas_used,
+                                    gas_cost_usd,
+                                    "❌ Bundle reverted on-chain"
+                                );
 
-                            tracing::info!(
-                                tx_hash       = %hash,
-                                landed_block  = landed,
-                                target_block  = target,
-                                sim_profit,
-                                actual_profit = reported_profit,
-                                "✅ Bundle confirmed on-chain"
-                            );
-                            kingfisher_api::metrics::OPPS_LANDED.inc();
-                            kingfisher_api::metrics::PROFIT_ACTUAL.inc_by(reported_profit);
-                            s.write().await.confirm_trade_landed(landed, reported_profit);
+                                let revert_tx = s.write().await.confirm_trade_reverted(
+                                    hash,
+                                    landed,
+                                    Some("On-chain execution reverted".into()),
+                                    gas_used,
+                                    gas_cost_usd,
+                                );
+                                kingfisher_api::persistence::append_trade(&revert_tx);
+                            }
+
                             to_remove.push(i);
                             hashes_to_drop.push(hash.clone());
                         }
                         Ok(None) if current_block > target + 3 => {
                             // 3 blocks past target with no receipt = not included
                             tracing::debug!(tx_hash = %hash, "Bundle not included (expired)");
+                            let dropped_tx = s.write().await.confirm_trade_dropped(hash, *target);
+                            kingfisher_api::persistence::append_trade(&dropped_tx);
                             to_remove.push(i);
                             hashes_to_drop.push(hash.clone());
                         }
@@ -544,8 +581,7 @@ async fn main() -> Result<()> {
                 tick.tick().await;
                 let (cumulative_gas, cumulative_profit) = {
                     let st = s.read().await;
-                    // Approximate: use total_profit as proxy for cumulative profit
-                    (st.total_profit_usd.max(0.0), st.total_profit_usd)
+                    (st.total_gas_spent_usd, st.total_profit_usd)
                 };
                 if window_start.elapsed().as_secs() >= window_secs {
                     let window_gas    = cumulative_gas - baseline_gas_usd;

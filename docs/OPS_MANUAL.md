@@ -118,12 +118,12 @@ Note: NEVER send stablecoins to the bot wallet.
 Profits accumulate in KingfisherArb as USDC/stablecoins.
 Withdraw to cold wallet at least weekly.
 
-### Method A — Cold Wallet Direct (Recommended)
-The dashboard does not currently have a withdraw button.
-Withdrawal requires a direct `cast send` from the cold wallet (Ledger/Gnosis Safe).
-See Method B below.
+### Method A — Dashboard One-Click (Operator Hot Wallet)
+Click the `↑ Withdraw` button in the top navigation bar of the dashboard and confirm.
+The bot will submit a direct `withdrawProfitBatch` transaction to sweep all accumulated
+stablecoin balances directly to the contract owner (cold wallet).
 
-### Method B — Direct from Cold Wallet (Recommended)
+### Method B — Direct from Cold Wallet (Recommended for Cold Transfers)
 ```bash
 # Check contract balance
 cast call $CONTRACT_ADDRESS_MAINNET \
@@ -153,6 +153,19 @@ After stress event: Same day
 After any anomaly:  Before resuming
 Target:           Never hold > 1 week's earnings in the contract
 ```
+
+---
+
+## Authoritative P&L & Landing Tracker
+
+Kingfisher completely decouples transaction submission from P&L recognition:
+1. **Submission**: When the Arbitrum sequencer accepts a transaction, it is marked **pending** (`success: false`, `profit_usd: None`). It does NOT credit profit, increment trade counts, or reset the circuit breaker.
+2. **Landing Confirmation**: The Landing Tracker polls `eth_getTransactionReceipt`:
+   - If `receipt.status == 1`: The bot decodes the on-chain `ArbExecuted(address,uint256,uint256,uint256,uint256)` event emitted by `KingfisherArb`. Net profit is credited exclusively from this event (falling back to $0.0 if missing, never to pre-trade simulation estimates). The trade is recorded as landed, and `consecutive_reverts` is reset to 0.
+   - If `receipt.status == 0`: The transaction reverted on-chain. It is classified via `RevertClass` (e.g. `ProfitBelowMin`, `PoolUnhealthy`, `PoolNotAllowed`). Non-race-loss errors increment `consecutive_reverts` and count toward the circuit breaker.
+   - If expired (3 blocks past target with no receipt): The bundle is dropped and recorded as unincluded.
+3. **Persistence**: Every confirmed landed trade and revert is appended to `{KINGFISHER_DATA_DIR}/trades.jsonl` via `append_trade()`. On process restart, `load_history()` restores all-time metrics.
+4. **Gas Accounting**: Real gas cost in USD (`receipt.gas_used * receipt.effective_gas_price * eth_price`) is accumulated in `total_gas_spent_usd` and monitored by the 1-hour gas drain watchdog.
 
 ---
 
@@ -203,7 +216,8 @@ NOT the trading list. Manual approval is required.
 
 3. Monitor for 24 hours:
    - Watch balance history in dashboard
-   - Confirm virtual_price > 1e18 and stable
+   - Confirm virtual_price >= 1e18 and stable.
+     *Note on Pool Health vs Slippage*: `isPoolHealthy()` (`virtual_price >= 1e18`) serves strictly as a coarse sanity floor against drained/broken Curve pools. Actual frontrunning and sandwich protection is enforced by the mathematical per-hop `minAmountOut` dynamic slippage model in the calldata encoder.
    - Review imbalance patterns
 
 4. Add to contract allowlist (from cold wallet):

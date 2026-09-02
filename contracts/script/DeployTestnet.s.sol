@@ -30,9 +30,10 @@ contract DeployTestnet is Script {
 
         vm.startBroadcast(deployerKey);
 
-        // HIGH-01 fix: 3-arg constructor — operator defaults to deployer (msg.sender)
+        // 4-arg constructor: operator = msg.sender (cold wallet) initially
         KingfisherArb arb = new KingfisherArb(
             AAVE_POOL,
+            address(0),
             MIN_PROFIT_WEI,
             initialPools
         );

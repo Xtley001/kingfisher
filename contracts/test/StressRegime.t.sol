@@ -32,7 +32,8 @@ contract StressRegimeTest is Test {
         pools[1] = CRVUSD_USDC;
         pools[2] = CRVUSD_USDT;
         pools[3] = TWOPOOL;
-        arb = new KingfisherArb(AAVE_POOL, 75e6, pools);
+        address constant BALANCER_VAULT = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
+        arb = new KingfisherArb(AAVE_POOL, BALANCER_VAULT, 75e6, pools);
     }
 
     /// @notice Simulates a 0.3% USDC depeg — stress_regime should activate in bot.

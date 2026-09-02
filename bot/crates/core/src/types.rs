@@ -139,6 +139,14 @@ impl AaveReserveStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FlashSource {
+    #[default]
+    Aave,
+    Balancer,
+}
+
 // ─── Opportunity ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +164,8 @@ pub struct Opportunity {
     pub aave_fee_usd:         Option<f64>,
     pub gas_cost_usd:         Option<f64>,
     pub edge_trigger:         Option<String>,
+    #[serde(default)]
+    pub flash_source:         FlashSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

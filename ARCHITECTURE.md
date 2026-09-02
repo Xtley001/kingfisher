@@ -21,15 +21,17 @@ Arbitrum One chain
                                        │
                                        └─ Executor
                                             - EIP-1559 tx builder
+                                            - Dynamic Timeboost bidding evaluation
+                                            - Block-scoped calldata cache & presigned pool
                                             - eth_sendRawTransaction → Arbitrum sequencer
-                                              (Timeboost express lane if configured)
+                                              (Timeboost express lane if qualified)
                                             - Landing tracker (receipt confirmation)
                                                   │
                                        ┌──────────┘
                                        ▼
                               KingfisherArb.sol (Arbitrum One)
                                        │
-                                       ├─ Aave V3 flashLoanSimple()
+                                       ├─ Balancer V2 flashLoan() (0% fee) / Aave V3 fallback
                                        ├─ Curve pool route execution (1–4 hops)
                                        ├─ Profit guard (require netProfit ≥ minProfit)
                                        └─ Profit accumulates → cold wallet withdrawal
@@ -43,13 +45,13 @@ Arbitrum One chain
 
 **`kingfisher-chain`** — block loop and on-chain data ingestion. Prefers IPC connection to a co-located Arbitrum Nitro node; falls back to WebSocket. Runs the Chainlink oracle watcher, multicall pool state fetcher, and event indexer for new pool discovery. Publishes `BotState` updates to the shared `RwLock`.
 
-**`kingfisher-scanner`** — 5-layer opportunity filter. L1 filters by pool imbalance percentage, L2 by velocity (imbalance change per block), L3 runs the algebraic cost simulation, L4 searches the route graph via DFS and Bellman-Ford for multi-hop paths, and L5 validates profitable candidates against eth_call. Returns `Vec<Opportunity>` sorted by expected profit.
+**`kingfisher-scanner`** — 5-layer opportunity filter. L1 filters by pool imbalance percentage, L2 by velocity (imbalance change per block), L3 runs the algebraic cost simulation (evaluating 0 bps fee for Balancer routes vs 5 bps for Aave), L4 searches the route graph via DFS and Bellman-Ford for multi-hop paths, and L5 validates profitable candidates against eth_call. Returns `Vec<Opportunity>` sorted by expected profit.
 
 **`kingfisher-simulation`** — profit simulation and validation. `simulate_opportunity()` is the algebraic fast-path used by the scanner (pure math, no RPC). `validation.rs` periodically compares the fast-path result to an eth_call result to detect simulation drift. `sizing.rs` implements the golden-section search for optimal flash loan amount.
 
 **`kingfisher-edges`** — edge-case opportunity monitors. Watches for LLAMMA liquidation cascades, peg stress events (USDC/USDT depeg), gauge vote windows (Curve emissions shifts), new pool deployments via Curve Factory events, LP removal events that create transient imbalances, Convex pool parameter changes, and admin fee collection events.
 
-**`kingfisher-executor`** — transaction building and submission. Builds EIP-1559 transactions with the encoded `executeArb()` calldata, signs them with the bot (operator) wallet, and broadcasts via `eth_sendRawTransaction` to the Arbitrum sequencer — or the Timeboost express lane if `TIMEBOOST_EXPRESS_LANE_URL` is set — with an optional best-effort mirror to a backup endpoint. There is no Flashbots/PBS on Arbitrum (single sequencer, no public mempool), so no bundle or builder-ranking layer is needed.
+**`kingfisher-executor`** — transaction building and submission. Evaluates dynamic Arbitrum Timeboost priority bidding (`timeboost.rs`), manages block-scoped calldata caching (`calldata_cache.rs`) and pre-signed gas envelopes (`presigned_pool.rs`), enforces hop-aware gas limits, builds signed EIP-1559 transactions, and broadcasts via `eth_sendRawTransaction` to the express lane or sequencer endpoint with an optional mirror broadcast. Handles zero-fee Balancer V2 and Aave V3 execution paths. There is no Flashbots/PBS on Arbitrum (single sequencer, no public mempool), so no bundle or builder-ranking layer is needed.
 
 **`kingfisher-api`** — REST + WebSocket API for the dashboard. Exposes bot state, opportunity feed, parameter updates, kill switch, and Prometheus metrics. Protected by static API key authentication.
 

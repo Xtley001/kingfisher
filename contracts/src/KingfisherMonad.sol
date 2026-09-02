@@ -25,6 +25,7 @@ contract KingfisherMonad {
     error InsufficientProfit(uint256 received, uint256 required);
     error ExecutionFailed(string reason);
     error ZeroAddress();
+    error VenueNotAllowed(address venue);
 
     // ─── Immutables & State ───────────────────────────────────────────────────
     address public immutable MORPHO_VAULT;
@@ -33,6 +34,7 @@ contract KingfisherMonad {
     address public profitWallet;
     bool public paused;
     uint256 public minProfitWei;
+    mapping(address => bool) public allowedVenues;
 
     // Transient execution state
     address private _initiator;
@@ -45,6 +47,7 @@ contract KingfisherMonad {
     event ProfitWalletUpdated(address indexed oldWallet, address indexed newWallet);
     event PausedSet(bool indexed paused);
     event MinProfitUpdated(uint256 newMinProfit);
+    event VenueAllowed(address indexed venue, bool allowed);
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -122,8 +125,12 @@ contract KingfisherMonad {
         // Execute venue hops
         for (uint256 i = 0; i < hops.length; i++) {
             SwapHop memory hop = hops[i];
+            if (!allowedVenues[hop.target]) {
+                revert VenueNotAllowed(hop.target);
+            }
             if (hop.tokenIn != address(0) && hop.target != address(0)) {
-                IERC20(hop.tokenIn).forceApprove(hop.target, type(uint256).max);
+                uint256 amountIn = IERC20(hop.tokenIn).balanceOf(address(this));
+                IERC20(hop.tokenIn).forceApprove(hop.target, amountIn);
             }
             (bool success, bytes memory ret) = hop.target.call(hop.payload);
             if (!success) {
@@ -149,6 +156,20 @@ contract KingfisherMonad {
     }
 
     // ─── Admin Functions ──────────────────────────────────────────────────────
+
+    function setVenueAllowed(address venue, bool allowed) external onlyOwner {
+        if (venue == address(0)) revert ZeroAddress();
+        allowedVenues[venue] = allowed;
+        emit VenueAllowed(venue, allowed);
+    }
+
+    function setVenuesAllowed(address[] calldata venues, bool allowed) external onlyOwner {
+        for (uint256 i = 0; i < venues.length; i++) {
+            if (venues[i] == address(0)) revert ZeroAddress();
+            allowedVenues[venues[i]] = allowed;
+            emit VenueAllowed(venues[i], allowed);
+        }
+    }
 
     function setOperator(address newOperator) external onlyOwner {
         if (newOperator == address(0)) revert ZeroAddress();

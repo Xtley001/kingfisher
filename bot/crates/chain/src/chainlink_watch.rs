@@ -129,7 +129,7 @@ async fn pre_build_bundles_for_pending_price(
                 profit = opp.estimated_profit_usd,
                 "⚡ Chainlink pre-build: opportunity ready — firing immediately"
             );
-            let _ = kingfisher_executor::execute(&opp, &network, &state).await;
+            crate::execute_and_track(&opp, &network, &state).await;
         }
         Ok(None)   => tracing::debug!("Chainlink pre-build: no profitable route at pending price"),
         Err(e)     => tracing::warn!(error = %e, "Chainlink pre-build: scanner error"),

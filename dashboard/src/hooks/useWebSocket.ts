@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react'
 import { useBotStore } from '../stores/botStore'
+import { getApiKey } from '../utils/auth'
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? 'ws://localhost:3001/ws'
-const API_KEY = import.meta.env.VITE_API_KEY ?? ''
 
 // MED-02: The browser WebSocket API does not allow setting arbitrary HTTP headers
 // during the initial Upgrade handshake. The standard workaround is to pass the
@@ -25,9 +25,10 @@ export function useWebSocket() {
   const connect = () => {
     if (unmounted.current) return
 
+    const apiKey = getApiKey()
     // Pass key as subprotocol — this header is included in the Upgrade request
     // but is NOT written to standard access logs (unlike URL query params).
-    const ws = new WebSocket(WS_URL, [`kingfisher-v1`, API_KEY])
+    const ws = new WebSocket(WS_URL, [`kingfisher-v1`, apiKey])
     wsRef.current = ws
 
     ws.onopen = () => {

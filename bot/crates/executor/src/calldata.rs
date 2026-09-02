@@ -15,11 +15,10 @@ use anyhow::Result;
 use alloy::sol;
 use alloy::sol_types::SolCall;
 use alloy::primitives::U256;
-use kingfisher_core::types::{Opportunity, PoolState};
+use kingfisher_core::types::{FlashSource, Opportunity, PoolState};
+use kingfisher_core::config::SlippageModelParams;
 
 // ── Compile-time ABI binding ─────────────────────────────────────────────────
-// Selector is keccak256("executeArb(address,uint256,(address,int128,int128,bool,uint256)[],uint256)")
-// verified at compile time — any ABI drift becomes a build error.
 sol! {
     struct Hop {
         address pool;
@@ -36,17 +35,31 @@ sol! {
         Hop[]   hops,
         uint256 minProfit
     ) external returns (uint256 netProfit);
+
+    function executeArbBalancer(
+        address flashToken,
+        uint256 flashAmount,
+        Hop[]   hops,
+        uint256 minProfit
+    ) external returns (uint256 netProfit);
 }
 
-/// ABI-encode `KingfisherArb.executeArb()` using the `sol!` macro.
-///
-/// # Dynamic slippage
-/// `pool_states` is used to look up pool depth for the dynamic tolerance model.
-/// If `pool_states` is empty or a pool cannot be found, falls back to 0.5% per hop.
+/// ABI-encode arbitrage execution call with default slippage model.
 pub fn encode_execute_arb(
     opp:           &Opportunity,
     current_block:  u64,
     pool_states:   &[PoolState],
+) -> Result<alloy::primitives::Bytes> {
+    encode_execute_arb_with_params(opp, current_block, pool_states, &SlippageModelParams::default())
+}
+
+/// ABI-encode arbitrage execution call with custom slippage model params.
+/// Dispatches to `executeArb` (Aave) or `executeArbBalancer` (Balancer) based on `opp.flash_source`.
+pub fn encode_execute_arb_with_params(
+    opp:           &Opportunity,
+    current_block:  u64,
+    pool_states:   &[PoolState],
+    params:        &SlippageModelParams,
 ) -> Result<alloy::primitives::Bytes> {
     let hops: Vec<Hop> = opp.route.iter().map(|h| {
         let pool_depth_usd = pool_states.iter()
@@ -65,11 +78,12 @@ pub fn encode_execute_arb(
             1
         };
 
-        let min_out = dynamic_min_amount_out(
+        let min_out = dynamic_min_amount_out_with_params(
             effective_expected,
             pool_depth_usd,
             blocks_since_scan,
             flash_usd,
+            params,
         ).max(1);
 
         Hop {
@@ -86,13 +100,20 @@ pub fn encode_execute_arb(
     let min_p_usd = opp.simulated_profit_usd.unwrap_or(opp.estimated_profit_usd) * 0.95;
     let min_p_wei = (min_p_usd * 1e6) as u128;
 
-    let calldata = executeArbCall {
-        flashToken:  opp.flash_token,
-        flashAmount: U256::from(opp.flash_amount),
-        hops,
-        minProfit:   U256::from(min_p_wei),
-    }
-    .abi_encode();
+    let calldata = match opp.flash_source {
+        FlashSource::Balancer => executeArbBalancerCall {
+            flashToken:  opp.flash_token,
+            flashAmount: U256::from(opp.flash_amount),
+            hops,
+            minProfit:   U256::from(min_p_wei),
+        }.abi_encode(),
+        FlashSource::Aave => executeArbCall {
+            flashToken:  opp.flash_token,
+            flashAmount: U256::from(opp.flash_amount),
+            hops,
+            minProfit:   U256::from(min_p_wei),
+        }.abi_encode(),
+    };
 
     Ok(alloy::primitives::Bytes::from(calldata))
 }
@@ -104,26 +125,42 @@ pub fn encode_execute_arb_simple(opp: &Opportunity) -> Result<alloy::primitives:
 
 // ── Dynamic per-hop slippage tolerance ──────────────────────────────
 
-/// Three-factor tolerance model — see module doc for rationale.
-/// Hard cap: 3% total (signals something structurally wrong if hit).
+/// Backward-compatible three-factor tolerance model with default parameters.
 pub fn dynamic_min_amount_out(
     expected_out:      u128,
     pool_depth_usd:    f64,
     blocks_since_scan: u64,
     flash_usd:         f64,
 ) -> u128 {
-    // Factor 1: depth-based baseline (0.3% for deep → 1.5% for shallow)
+    dynamic_min_amount_out_with_params(
+        expected_out,
+        pool_depth_usd,
+        blocks_since_scan,
+        flash_usd,
+        &SlippageModelParams::default(),
+    )
+}
+
+/// Three-factor tolerance model with tunable parameters.
+pub fn dynamic_min_amount_out_with_params(
+    expected_out:      u128,
+    pool_depth_usd:    f64,
+    blocks_since_scan: u64,
+    flash_usd:         f64,
+    params:            &SlippageModelParams,
+) -> u128 {
+    // Factor 1: depth-based baseline (depth_base for deep → + depth_shallow for shallow)
     let depth_m   = (pool_depth_usd / 1_000_000.0).max(0.1);
-    let depth_tol = 0.003 + (1.0 / depth_m).min(0.5) * 0.012;
+    let depth_tol = params.depth_base + (1.0 / depth_m).min(0.5) * params.depth_shallow;
 
-    // Factor 2: time drift (0.02% per block since scan, cap 0.5%)
-    let time_tol = (blocks_since_scan as f64 * 0.0002).min(0.005);
+    // Factor 2: time drift (time_drift_rate per block since scan, cap time_drift_cap)
+    let time_tol = (blocks_since_scan as f64 * params.time_drift_rate).min(params.time_drift_cap);
 
-    // Factor 3: size relative to pool (0% → +1% as ratio 0 → 50%)
+    // Factor 3: size relative to pool
     let size_ratio = (flash_usd / pool_depth_usd.max(1.0)).min(0.5);
-    let size_tol   = size_ratio * 0.02;
+    let size_tol   = size_ratio * params.size_ratio_weight;
 
-    let total_tol = (depth_tol + time_tol + size_tol).min(0.03); // hard cap 3%
+    let total_tol = (depth_tol + time_tol + size_tol).min(params.hard_cap);
     let floor     = (expected_out as f64 * (1.0 - total_tol)) as u128;
     floor.max(1)
 }
@@ -140,17 +177,12 @@ mod tests {
 
     #[test]
     fn test_dynamic_slippage_shallow_pool_with_lag() {
-        // Shallow pool + lag + sizeable relative trade → ~1.5% tolerance, clearly
-        // wider than a deep pool with no lag (~0.3%).
         let min = dynamic_min_amount_out(1_000_000, 200_000.0, 5, 50_000.0);
         assert!(min < 990_000, "Expected wider tolerance than a deep pool, got min={min}");
     }
 
     #[test]
     fn test_dynamic_slippage_extreme_inputs_max_tolerance() {
-        // Extreme inputs (tiny pool, huge relative trade, long lag) saturate every
-        // component. Total tolerance maxes at ~2.4%, staying under the 3% hard-cap
-        // ceiling — so the floor lands near 976k, not the cap.
         let min = dynamic_min_amount_out(1_000_000, 1_000.0, 100, 999_000.0);
         assert!(min >= 975_000 && min <= 977_000, "min={min}");
     }
@@ -159,5 +191,13 @@ mod tests {
     fn test_min_amount_nonzero() {
         let min = dynamic_min_amount_out(1, 1_000.0, 100, 999.0);
         assert!(min >= 1, "Must never return zero");
+    }
+
+    #[test]
+    fn test_custom_slippage_params() {
+        let mut custom = SlippageModelParams::default();
+        custom.depth_base = 0.01; // 1% base
+        let min = dynamic_min_amount_out_with_params(1_000_000, 100_000_000.0, 0, 10_000.0, &custom);
+        assert!(min <= 990_000, "Custom depth_base 1% should yield <= 990_000, got {min}");
     }
 }

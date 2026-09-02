@@ -1,12 +1,32 @@
 import { create } from 'zustand'
 
+export interface SlippageModelParams {
+  depth_base:        number
+  depth_shallow:     number
+  time_drift_rate:   number
+  time_drift_cap:    number
+  size_ratio_weight: number
+  hard_cap:          number
+}
+
 export interface BotParams {
-  min_profit_usd:    number
-  min_imbalance_pct: number
-  min_velocity:      number
-  gas_reserve_eth:   number
-  alert_gas_eth:     number
-  abs_cap_usd:       number
+  min_profit_usd:                 number
+  min_gas_roi:                    number
+  min_imbalance_pct:              number
+  min_velocity:                   number
+  gas_reserve_eth:                number
+  alert_gas_eth:                  number
+  abs_cap_usd:                    number
+  gas_limit_override:             number
+  timeboost_min_profit_usd:       number
+  timeboost_race_loss_threshold:  number
+  stress_priority_fee_multiplier: number
+  gas_limit_2hop:                 number
+  gas_limit_4hop:                 number
+  calldata_cache_enabled:         boolean
+  presigned_pool_enabled:         boolean
+  flash_source_preference:        'aave_only' | 'balancer_preferred'
+  slippage_model:                 SlippageModelParams
 }
 
 export interface AaveStatus {
@@ -80,14 +100,24 @@ interface Store {
   triggerWithdrawal: () => Promise<void>
 }
 
+import { getApiKey } from '../utils/auth'
+
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3001'
-const API_KEY = import.meta.env.VITE_API_KEY ?? ''
 
 const DEFAULT_AAVE: AaveStatus = {
   available_liquidity: 0,
   borrow_cap:          0,
   reserve_active:      false,
   last_updated_block:  0,
+}
+
+const DEFAULT_SLIPPAGE: SlippageModelParams = {
+  depth_base:        0.003,
+  depth_shallow:     0.012,
+  time_drift_rate:   0.0002,
+  time_drift_cap:    0.005,
+  size_ratio_weight: 0.02,
+  hard_cap:          0.03,
 }
 
 export const useBotStore = create<Store>((set, get) => ({
@@ -114,12 +144,23 @@ export const useBotStore = create<Store>((set, get) => ({
   recent_txs:       [],
   pool_states:      [],
   params: {
-    min_profit_usd:    75,
-    min_imbalance_pct: 5,
-    min_velocity:      0.015,
-    gas_reserve_eth:   0.10,
-    alert_gas_eth:     0.30,
-    abs_cap_usd:       100_000_000,
+    min_profit_usd:                 75,
+    min_gas_roi:                    3.0,
+    min_imbalance_pct:              5,
+    min_velocity:                   0.015,
+    gas_reserve_eth:                0.10,
+    alert_gas_eth:                  0.30,
+    abs_cap_usd:                    25_000_000,
+    gas_limit_override:             750_000,
+    timeboost_min_profit_usd:       75,
+    timeboost_race_loss_threshold:  0.25,
+    stress_priority_fee_multiplier: 0.25,
+    gas_limit_2hop:                 350_000,
+    gas_limit_4hop:                 750_000,
+    calldata_cache_enabled:         true,
+    presigned_pool_enabled:         true,
+    flash_source_preference:        'balancer_preferred',
+    slippage_model:                 DEFAULT_SLIPPAGE,
   },
 
   setConnected: c => set({ connected: c }),
@@ -149,9 +190,10 @@ export const useBotStore = create<Store>((set, get) => ({
   })),
 
   updateParams: async updates => {
+    const apiKey = getApiKey()
     const res = await fetch(`${API_URL}/api/params`, {
       method:  'PATCH',
-      headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_KEY },
+      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey },
       body:    JSON.stringify(updates),
     })
     if (res.ok) {
@@ -160,17 +202,19 @@ export const useBotStore = create<Store>((set, get) => ({
   },
 
   sendCommand: async cmd => {
+    const apiKey = getApiKey()
     await fetch(`${API_URL}/api/command`, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_KEY },
+      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey },
       body:    JSON.stringify({ command: cmd }),
     })
   },
 
   triggerWithdrawal: async () => {
+    const apiKey = getApiKey()
     await fetch(`${API_URL}/api/withdraw`, {
       method:  'POST',
-      headers: { 'X-Api-Key': API_KEY },
+      headers: { 'X-Api-Key': apiKey },
     })
   },
 }))

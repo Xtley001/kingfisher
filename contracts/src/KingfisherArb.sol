@@ -5,37 +5,29 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IAavePool, IFlashLoanSimpleReceiver} from "./interfaces/IAavePool.sol";
+import {IBalancerVault, IFlashLoanRecipient} from "./interfaces/IBalancerVault.sol";
 import {ICurvePool, ICurveMetaPool} from "./interfaces/ICurvePool.sol";
 
 /**
- * @title KingfisherArb v2
- * @notice Atomic flash loan arbitrage across Curve stablecoin pools on Arbitrum.
+ * @title KingfisherArb v2.1
+ * @notice Atomic flash loan arbitrage across Curve stablecoin pools on Arbitrum One.
  *
- * @dev Changes from v1:
- *   - Item #12: All `require(cond, "string")` replaced with typed custom errors
- *     (-50 gas per check at execution; structured revert data for off-chain decoding)
- *   - Item #11: Transient storage reentrancy lock (EIP-1153 TSTORE/TLOAD)
- *     replaces OZ ReentrancyGuard (-20,000 gas cold write; -2,800 gas warm)
- *   - Item #10: Yul assembly hot path in executeOperation() and _transfer()
- *     (-2,400 gas on caller checks; -300 gas per hop on token transfers)
- *   - Item #22: operator/owner separation — operator = hot bot wallet;
- *     owner = cold wallet that can only withdraw and update the operator
- *
- * Flow:
- *   1. Operator calls executeArb() with flash amount and route (Hop[])
- *   2. Contract calls Aave V3 flashLoanSimple() — borrows flash token
- *   3. Aave calls executeOperation() callback — executes Curve swap route
- *   4. After last swap, approves Aave repayment (amount + premium)
- *   5. require(profit >= minProfit) — reverts entire tx if unprofitable
- *   6. Profit stays in contract until owner calls withdrawProfit()
+ * Features:
+ *   - Dual borrow sources: Balancer V2 (0% fee, zero-margin loss) and Aave V3 fallback (5 bps).
+ *   - Typed custom errors for -50 gas per check and off-chain 4-byte selector decoding.
+ *   - Transient storage reentrancy lock (EIP-1153 TSTORE/TLOAD) saving 19,900 gas.
+ *   - Yul assembly hot path in callbacks and _approve.
+ *   - Operator / owner separation: hot bot wallet executes arbs; cold wallet withdraws and manages allowlists.
  */
-contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
+contract KingfisherArb is IFlashLoanSimpleReceiver, IFlashLoanRecipient, Ownable2Step {
     using SafeERC20 for IERC20;
 
-    // ─── Item #12: Custom errors (replaces all require strings) ───────────────
+    // ─── Custom Errors ────────────────────────────────────────────────────────
 
     error NotOperator();
     error NotAavePool();
+    error NotBalancerVault();
+    error BalancerDisabled();
     error BadInitiator();
     error ContractPaused();
     error ZeroAmount();
@@ -49,11 +41,7 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
     error EthTransferFailed();
     error ZeroAddress();
 
-    // ─── Item #11: Transient storage reentrancy lock (EIP-1153) ─────────────
-    // Replaces OZ ReentrancyGuard:
-    //   SSTORE (cold): 20,000 gas → TSTORE: 100 gas  (-19,900 gas first trade)
-    //   SSTORE (warm):  2,900 gas → TSTORE: 100 gas  (-2,800 gas every trade)
-    // TSTORE is cleared atomically at end of transaction — no state cleanup needed.
+    // ─── Transient Storage Reentrancy Lock (EIP-1153) ─────────────────────────
 
     uint256 private constant _REENTRANCY_SLOT = 0x52454e5452414e4359; // "REENTRANCY"
 
@@ -68,7 +56,8 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
 
     // ─── Immutables ──────────────────────────────────────────────────────────
 
-    IAavePool public immutable AAVE_POOL;
+    IAavePool      public immutable AAVE_POOL;
+    IBalancerVault public immutable BALANCER_VAULT;
 
     // ─── Constants ───────────────────────────────────────────────────────────
 
@@ -76,21 +65,13 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
 
     // ─── Mutable State ───────────────────────────────────────────────────────
 
-    /// Item #22: Operator = hot bot wallet (only calls executeArb)
-    ///           Owner   = cold wallet (withdrawals, operator updates, pool allowlist)
     address public operator;
-
     uint256 public minProfitWei;
     bool    public paused;
     mapping(address => bool) public allowedPools;
 
     // ─── Route Encoding ──────────────────────────────────────────────────────
 
-    /**
-     * @notice One swap step in the arbitrage route.
-     * @param minAmountOut  Per-hop minimum output (Item #23: dynamic slippage).
-     *                      Must be > 0 — passing 0 is rejected to prevent silent slippage.
-     */
     struct Hop {
         address pool;
         address tokenIn;
@@ -110,7 +91,7 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
     event ArbExecuted(
         address indexed flashToken,
         uint256         flashAmount,
-        uint256         aavePremium,
+        uint256         flashFee,
         uint256         netProfit,
         uint256         hopsCount
     );
@@ -124,16 +105,16 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
 
     constructor(
         address          _aavePool,
+        address          _balancerVault,
         uint256          _minProfitWei,
         address[] memory _initialPools
     ) Ownable(msg.sender) {
         if (_aavePool == address(0)) revert ZeroAddress();
 
-        AAVE_POOL    = IAavePool(_aavePool);
-        // Deployer (cold wallet) is the initial operator.
-        // Immediately call setOperator(hotWalletAddress) after deploy to rotate to the hot wallet.
-        operator     = msg.sender;
-        minProfitWei = _minProfitWei;
+        AAVE_POOL      = IAavePool(_aavePool);
+        BALANCER_VAULT = IBalancerVault(_balancerVault);
+        operator       = msg.sender;
+        minProfitWei   = _minProfitWei;
 
         for (uint256 i = 0; i < _initialPools.length; i++) {
             if (_initialPools[i] == address(0)) revert ZeroAddress();
@@ -149,22 +130,63 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
         _;
     }
 
-    // ─── External: Initiate Arb ───────────────────────────────────────────────
+    // ─── External: Initiate Arb via Aave V3 ───────────────────────────────────
 
-    /**
-     * @notice Operator (hot wallet) initiates a flash loan arb.
-     * @dev Item #12: All checks use custom errors.
-     */
     function executeArb(
         address        flashToken,
         uint256        flashAmount,
         Hop[] calldata hops,
         uint256        minProfit
     ) external onlyOperator nonReentrant returns (uint256 netProfit) {
-        if (paused)       revert ContractPaused();
+        _validatePreExecution(flashAmount, hops, minProfit);
+
+        uint256 balanceBefore = IERC20(flashToken).balanceOf(address(this));
+        bytes memory params = abi.encode(RouteParams({hops: hops, minProfit: minProfit}));
+
+        AAVE_POOL.flashLoanSimple(address(this), flashToken, flashAmount, params, 0);
+
+        uint256 balanceAfter = IERC20(flashToken).balanceOf(address(this));
+        netProfit = balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0;
+    }
+
+    // ─── External: Initiate Arb via Balancer V2 (0% Fee) ───────────────────────
+
+    function executeArbBalancer(
+        address        flashToken,
+        uint256        flashAmount,
+        Hop[] calldata hops,
+        uint256        minProfit
+    ) external onlyOperator nonReentrant returns (uint256 netProfit) {
+        if (address(BALANCER_VAULT) == address(0)) revert BalancerDisabled();
+        _validatePreExecution(flashAmount, hops, minProfit);
+
+        uint256 balanceBefore = IERC20(flashToken).balanceOf(address(this));
+        bytes memory params = abi.encode(RouteParams({hops: hops, minProfit: minProfit}), address(this));
+
+        IERC20[] memory tokens = new IERC20[](1);
+        tokens[0] = IERC20(flashToken);
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = flashAmount;
+
+        BALANCER_VAULT.flashLoan(address(this), tokens, amounts, params);
+
+        uint256 balanceAfter = IERC20(flashToken).balanceOf(address(this));
+        netProfit = balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0;
+    }
+
+    // ─── Shared Validation ────────────────────────────────────────────────────
+
+    function _validatePreExecution(
+        uint256        flashAmount,
+        Hop[] calldata hops,
+        uint256        minProfit
+    ) internal view {
+        if (paused) revert ContractPaused();
         if (flashAmount == 0) revert ZeroAmount();
         if (hops.length < 2 || hops.length > MAX_HOPS)
             revert InvalidRouteLength(hops.length);
+        if (minProfit < minProfitWei)
+            revert ProfitBelowMin(minProfit, minProfitWei);
 
         for (uint256 i = 0; i < hops.length; i++) {
             if (!allowedPools[hops[i].pool])
@@ -176,24 +198,10 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
             if (hops[i].minAmountOut == 0)
                 revert ZeroMinAmountOut(i);
         }
-
-        bytes memory params = abi.encode(RouteParams({hops: hops, minProfit: minProfit}));
-
-        AAVE_POOL.flashLoanSimple(address(this), flashToken, flashAmount, params, 0);
-
-        // Return accumulated profit for off-chain eth_call inspection
-        netProfit = IERC20(flashToken).balanceOf(address(this));
     }
 
-    // ─── Aave V3 Callback ────────────────────────────────────────────────────
+    // ─── Aave Callback: executeOperation ──────────────────────────────────────
 
-    /**
-     * @notice Called by Aave after sending the flash loan.
-     *
-     * @dev Notice: nonReentrant is omitted here because executeArb() holds the lock
-     *      and Aave re-enters via this callback. Security against unauthorized entry
-     *      is strictly enforced below via caller == AAVE_POOL and initiator == address(this).
-     */
     function executeOperation(
         address        asset,
         uint256        amount,
@@ -201,37 +209,92 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
         address        initiator,
         bytes calldata params
     ) external override returns (bool) {
-
-        // Item #10: Tight caller + initiator checks.
-        {
-            address _aavePool = address(AAVE_POOL);
-            assembly {
-                // if (msg.sender != AAVE_POOL) revert NotAavePool() selector
-                if iszero(eq(caller(), _aavePool)) {
-                    mstore(0x00, 0x9f87fad700000000000000000000000000000000000000000000000000000000)
-                    revert(0x00, 0x04)
-                }
-                // if (initiator != address(this)) revert BadInitiator()
-                if iszero(eq(initiator, address())) {
-                    mstore(0x00, 0x5c5eb8de00000000000000000000000000000000000000000000000000000000)
-                    revert(0x00, 0x04)
-                }
+        address _aavePool = address(AAVE_POOL);
+        assembly {
+            if iszero(eq(caller(), _aavePool)) {
+                // NotAavePool()
+                mstore(0x00, 0x9f87fad700000000000000000000000000000000000000000000000000000000)
+                revert(0x00, 0x04)
+            }
+            if iszero(eq(initiator, address())) {
+                // BadInitiator()
+                mstore(0x00, 0x5c5eb8de00000000000000000000000000000000000000000000000000000000)
+                revert(0x00, 0x04)
             }
         }
 
         RouteParams memory route = abi.decode(params, (RouteParams));
-
         uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
 
-        // ─── Execute each swap hop ────────────────────────────────────────────
-        for (uint256 i = 0; i < route.hops.length; i++) {
-            Hop memory hop = route.hops[i];
+        _executeHops(route.hops);
 
+        // Repay Aave (amount + premium)
+        uint256 repayAmount = amount + premium;
+        _approve(asset, address(AAVE_POOL), repayAmount);
+
+        // Profit guard
+        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+        uint256 netProfit = balanceAfter > (balanceBefore + premium)
+            ? balanceAfter - balanceBefore - premium
+            : 0;
+
+        if (netProfit < route.minProfit)
+            revert ProfitBelowMin(netProfit, route.minProfit);
+
+        emit ArbExecuted(asset, amount, premium, netProfit, route.hops.length);
+        return true;
+    }
+
+    // ─── Balancer Callback: receiveFlashLoan (0% Fee) ─────────────────────────
+
+    function receiveFlashLoan(
+        IERC20[] memory tokens,
+        uint256[] memory amounts,
+        uint256[] memory feeAmounts,
+        bytes memory    userData
+    ) external override {
+        address _vault = address(BALANCER_VAULT);
+        assembly {
+            if iszero(eq(caller(), _vault)) {
+                // NotBalancerVault()
+                mstore(0x00, 0x8a92bb1c00000000000000000000000000000000000000000000000000000000)
+                revert(0x00, 0x04)
+            }
+        }
+
+        (RouteParams memory route, address initiator) = abi.decode(userData, (RouteParams, address));
+        if (initiator != address(this)) revert BadInitiator();
+
+        address asset = address(tokens[0]);
+        uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
+
+        _executeHops(route.hops);
+
+        // Repay Balancer Vault directly
+        uint256 repayAmount = amounts[0] + feeAmounts[0];
+        tokens[0].safeTransfer(address(BALANCER_VAULT), repayAmount);
+
+        // Profit guard (0 bps fee)
+        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+        uint256 netProfit = balanceAfter > (balanceBefore + feeAmounts[0])
+            ? balanceAfter - balanceBefore - feeAmounts[0]
+            : 0;
+
+        if (netProfit < route.minProfit)
+            revert ProfitBelowMin(netProfit, route.minProfit);
+
+        emit ArbExecuted(asset, amounts[0], feeAmounts[0], netProfit, route.hops.length);
+    }
+
+    // ─── Shared Swap Hop Execution Loop ──────────────────────────────────────
+
+    function _executeHops(Hop[] memory hops) internal {
+        for (uint256 i = 0; i < hops.length; i++) {
+            Hop memory hop = hops[i];
             address tokenIn  = hop.tokenIn;
             uint256 amountIn = IERC20(tokenIn).balanceOf(address(this));
             if (amountIn == 0) revert ZeroInputAtHop(i);
 
-            // Assembly token transfer/approve — saves ~300 gas per hop
             _approve(tokenIn, hop.pool, amountIn);
 
             if (hop.isMetaPool) {
@@ -244,49 +307,17 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
                 );
             }
         }
-
-        // ─── Repay Aave ───────────────────────────────────────────────────────
-        uint256 repayAmount = amount + premium;
-        _approve(asset, address(AAVE_POOL), repayAmount);
-
-        // ─── Profit guard ─────────────────────────────────────────────────────
-        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
-        uint256 netProfit    = balanceAfter > (balanceBefore + premium)
-            ? balanceAfter - balanceBefore - premium
-            : 0;
-
-        if (netProfit < route.minProfit)
-            revert ProfitBelowMin(netProfit, route.minProfit);
-
-        emit ArbExecuted(asset, amount, premium, netProfit, route.hops.length);
-        return true;
     }
 
-    // ─── Item #10: Assembly token approve ───────────────────────────────────
+    // ─── Inline Assembly Token Approve ────────────────────────────────────────
 
-    /**
-     * @dev Yul inline approve — saves ~300 gas vs SafeERC20.forceApprove per call.
-     * Encodes approve(address,uint256) and calls it directly.
-     * Reverts if the call fails.
-     */
     function _approve(address token, address spender, uint256 amount) internal {
         assembly {
-            // approve(address,uint256) ABI encoding:
-            //   [0..4]   selector  0x095ea7b3
-            //   [4..36]  spender   zero-padded to 32 bytes (address in low 20 bytes)
-            //   [36..68] amount    uint256
             let ptr := mload(0x40)
-            // Write selector
             mstore(ptr, 0x095ea7b300000000000000000000000000000000000000000000000000000000)
-            // Write spender (address ABI-encoding: left-pad with 12 zero bytes)
-            mstore(add(ptr, 4), spender) // mstore writes 32 bytes; address is in low 20 bytes = correct
-            // Reset allowance to 0 first (required by USDT and similar tokens)
+            mstore(add(ptr, 4), spender)
             mstore(add(ptr, 36), 0)
-            // Zero-reset: USDT and similar tokens require allowance reset before re-approval.
-            // Result intentionally discarded — all whitelisted tokens (USDC/USDT/FRAX/crvUSD
-            // on Arbitrum One) comply with ERC20 and cannot revert on approve(spender, 0).
             pop(call(gas(), token, 0, ptr, 68, 0, 0))
-            // Set actual approved amount
             mstore(add(ptr, 36), amount)
             if iszero(call(gas(), token, 0, ptr, 68, 0, 0)) {
                 revert(0, 0)
@@ -294,17 +325,13 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
         }
     }
 
-    // ─── Item #22: Hot/Cold Wallet Separation ─────────────────────────────────
+    // ─── Owner Controls & Withdrawals ─────────────────────────────────────────
 
-    /// Owner (cold wallet) can update the operator (hot bot wallet).
-    /// If hot wallet is compromised, call this from cold wallet to rotate.
     function setOperator(address _operator) external onlyOwner {
         if (_operator == address(0)) revert ZeroAddress();
         emit OperatorUpdated(operator, _operator);
         operator = _operator;
     }
-
-    // ─── Owner Controls ───────────────────────────────────────────────────────
 
     function setPoolAllowed(address pool, bool allowed) external onlyOwner {
         allowedPools[pool] = allowed;
@@ -318,7 +345,7 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
         }
     }
 
-    function setMinProfit(uint256 _minProfitWei) external onlyOwner {
+    function setMinProfitWei(uint256 _minProfitWei) external onlyOwner {
         minProfitWei = _minProfitWei;
         emit MinProfitUpdated(_minProfitWei);
     }
@@ -328,44 +355,28 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
         emit PausedUpdated(_paused);
     }
 
-    modifier onlyOperatorOrOwner() {
-        if (msg.sender != owner() && msg.sender != operator) revert NotOperator();
-        _;
-    }
-
-    /// Withdraw profit to owner (cold wallet). Can be triggered by owner or operator bot.
-    function withdrawProfit(address token) external onlyOperatorOrOwner {
+    function withdrawProfit(address token) external onlyOwner {
         uint256 balance = IERC20(token).balanceOf(address(this));
         if (balance == 0) revert NothingToWithdraw(token);
         IERC20(token).safeTransfer(owner(), balance);
         emit ProfitWithdrawn(token, balance, owner());
     }
 
-    function withdrawProfitBatch(address[] calldata tokens) external onlyOperatorOrOwner {
+    function withdrawProfitBatch(address[] calldata tokens) external onlyOwner {
         for (uint256 i = 0; i < tokens.length; i++) {
-            uint256 bal = IERC20(tokens[i]).balanceOf(address(this));
-            if (bal > 0) {
-                IERC20(tokens[i]).safeTransfer(owner(), bal);
-                emit ProfitWithdrawn(tokens[i], bal, owner());
+            uint256 balance = IERC20(tokens[i]).balanceOf(address(this));
+            if (balance > 0) {
+                IERC20(tokens[i]).safeTransfer(owner(), balance);
+                emit ProfitWithdrawn(tokens[i], balance, owner());
             }
         }
     }
 
-    function withdrawETH() external onlyOwner {
-        uint256 bal = address(this).balance;
-        if (bal == 0) revert NothingToWithdraw(address(0));
-        (bool ok,) = payable(owner()).call{value: bal}("");
+    function rescueETH() external onlyOwner {
+        uint256 balance = address(this).balance;
+        if (balance == 0) revert NothingToWithdraw(address(0));
+        (bool ok, ) = owner().call{value: balance}("");
         if (!ok) revert EthTransferFailed();
-    }
-
-    // ─── View Functions ───────────────────────────────────────────────────────
-
-    function isPoolHealthy(address pool) external view returns (bool) {
-        try ICurvePool(pool).get_virtual_price() returns (uint256 vp) {
-            return vp >= 1e18;
-        } catch {
-            return false;
-        }
     }
 
     receive() external payable {}

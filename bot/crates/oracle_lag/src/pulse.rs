@@ -86,6 +86,7 @@ pub struct VenueQuote {
 
 /// Scan for PULSE oracle backrun opportunities.
 /// Rejects stale opportunities older than MAX_STALENESS_MS (Gap #3 fix).
+#[allow(clippy::too_many_arguments)]
 pub fn scan_pulse(
     updates: &[PythPriceUpdate],
     feed_registry: &PythFeedRegistry,
@@ -171,14 +172,14 @@ pub fn scan_pulse(
                 }
 
                 // Gap #2 Fix: Verify CLOB legs resolve through MarketAddress
-                if fast.venue == VenueKind::Kuru || fast.venue == VenueKind::Crystal {
-                    if market_registry.resolve_market(asset, quote_tok).is_none() {
-                        tracing::debug!(
-                            venue = ?fast.venue,
-                            "Missing verified MarketAddress for CLOB venue — skipping"
-                        );
-                        continue;
-                    }
+                if (fast.venue == VenueKind::Kuru || fast.venue == VenueKind::Crystal)
+                    && market_registry.resolve_market(asset, quote_tok).is_none()
+                {
+                    tracing::debug!(
+                        venue = ?fast.venue,
+                        "Missing verified MarketAddress for CLOB venue — skipping"
+                    );
+                    continue;
                 }
 
                 opportunities.push(Opportunity {
@@ -202,6 +203,7 @@ pub fn scan_pulse(
                     aave_fee_usd: Some(0.0), // Morpho 0 bps fee
                     gas_cost_usd: Some(estimated_gas_usd),
                     edge_trigger: Some("Strategy_B_PULSE".into()),
+                    flash_source: kingfisher_core::types::FlashSource::Aave,
                 });
             }
         }

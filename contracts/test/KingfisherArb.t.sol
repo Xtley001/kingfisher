@@ -43,6 +43,8 @@ contract KingfisherArbTest is Test {
 
     address constant USDC_WHALE     = 0xB38e8c17e38363aF6EbdCb3dAE12e0243582891D;
 
+    address constant BALANCER_VAULT = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
+
     address[] pools;
 
     function setUp() public {
@@ -54,13 +56,13 @@ contract KingfisherArbTest is Test {
         pools[2] = CRVUSD_USDT;
         pools[3] = TWOPOOL;
 
-        // HIGH-01 fix: 3-arg constructor — operator defaults to msg.sender (this test contract).
-        // On mainnet: deployer (cold wallet) is initial operator; call setOperator(hotWallet) next.
-        arb = new KingfisherArb(AAVE_POOL, 75e6, pools);
+        // 4-arg constructor: operator defaults to msg.sender (this test contract).
+        arb = new KingfisherArb(AAVE_POOL, BALANCER_VAULT, 75e6, pools);
     }
 
     function test_Deployment() public view {
         assertEq(address(arb.AAVE_POOL()), AAVE_POOL);
+        assertEq(address(arb.BALANCER_VAULT()), BALANCER_VAULT);
         assertEq(arb.owner(),    address(this));
         assertEq(arb.operator(), address(this));
         assertFalse(arb.paused());
@@ -266,5 +268,27 @@ contract KingfisherArbTest is Test {
         assertGt(contractBalance, 0, "No profit accumulated");
 
         console2.log("test_RealArb: net profit (USDC wei):", contractBalance);
+    }
+
+    function test_OnlyOperatorCanExecuteBalancer() public {
+        address attacker = makeAddr("attacker");
+        KingfisherArb.Hop[] memory hops = new KingfisherArb.Hop[](2);
+        vm.prank(attacker);
+        vm.expectRevert(KingfisherArb.NotOperator.selector);
+        arb.executeArbBalancer(USDC, 1_000e6, hops, 75e6);
+    }
+
+    function test_RevertIfCallerNotBalancerVault() public {
+        address attacker = makeAddr("attacker");
+        IERC20[] memory tokens = new IERC20[](1);
+        tokens[0] = IERC20(USDC);
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 1_000e6;
+        uint256[] memory fees = new uint256[](1);
+        fees[0] = 0;
+
+        vm.prank(attacker);
+        vm.expectRevert(KingfisherArb.NotBalancerVault.selector);
+        arb.receiveFlashLoan(tokens, amounts, fees, "");
     }
 }

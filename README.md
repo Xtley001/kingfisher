@@ -6,13 +6,13 @@ Flash-loan arbitrage bot for Curve stablecoin pools on Arbitrum One.
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](./LICENSE)
 [![Network: Arbitrum One](https://img.shields.io/badge/network-Arbitrum%20One-2D374B)](https://arbiscan.io)
 
-Kingfisher borrows stablecoins from Aave V3, captures the StableSwap price spread between two imbalanced Curve pools, and repays atomically in a single transaction. Every trade is guarded on-chain by `require(netProfit >= minProfit)` — a losing race reverts and costs only gas, so principal is never at risk. For the strategy, edge sources, execution model, and an honest profitability analysis, see the [strategy doc](./docs/STRATEGY.md).
+Kingfisher borrows stablecoins from Balancer V2 (0% fee) or Aave V3 (5 bps fallback), captures the StableSwap price spread between two imbalanced Curve pools, and repays atomically in a single transaction. Every trade is guarded on-chain by `require(netProfit >= minProfit)` — a losing race reverts and costs only gas, so principal is never at risk. For the strategy, edge sources, execution model, and an honest profitability analysis, see the [strategy doc](./docs/STRATEGY.md).
 
 ## Stack
 
 | Layer | Technology |
 |---|---|
-| On-chain | Solidity · Foundry · Aave V3 · Curve |
+| On-chain | Solidity · Foundry · Balancer V2 · Aave V3 · Curve |
 | Bot engine | Rust · alloy-rs · tokio · rayon |
 | Dashboard | React 18 · TypeScript · Vite |
 | Hosting | Bare-metal (systemd) near the Arbitrum sequencer; dashboard on any static host |
@@ -23,10 +23,10 @@ Kingfisher borrows stablecoins from Aave V3, captures the StableSwap price sprea
 flowchart LR
     A[Scanner detects<br/>pool imbalance] --> B[Sizing engine<br/>optimal borrow]
     B --> C[executeArb tx<br/>to sequencer]
-    C --> D[Aave V3<br/>flashLoanSimple]
+    C --> D[Balancer V2 / Aave V3<br/>flash loan]
     D --> E[Curve swap route<br/>1-4 hops]
     E --> F{netProfit ≥ minProfit?}
-    F -->|yes| G[Repay Aave,<br/>keep spread]
+    F -->|yes| G[Repay loan,<br/>keep spread]
     F -->|no| H[Revert<br/>gas only]
 ```
 

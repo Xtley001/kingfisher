@@ -138,6 +138,7 @@ pub fn scan_liquidation_candidates(
             aave_fee_usd: Some(flash_usd * 0.0005),
             gas_cost_usd: Some(gas_cost_usd),
             edge_trigger: Some("A6_Liquidation".into()),
+            flash_source: kingfisher_core::types::FlashSource::Aave,
         });
     }
 

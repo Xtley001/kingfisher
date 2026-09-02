@@ -36,21 +36,26 @@ pub fn estimate_profit(
 
     let gas_est = gas_usd_for_route(route, base_fee, eth_price);
 
+    let (borrow_fee_bps, flash_source) = match params.flash_source_preference {
+        kingfisher_core::config::FlashSourcePreference::BalancerPreferred => (0.0, kingfisher_core::types::FlashSource::Balancer),
+        kingfisher_core::config::FlashSourcePreference::AaveOnly => (aave_fee_bps as f64, kingfisher_core::types::FlashSource::Aave),
+    };
+
     // Evaluate both directions on 2-hop routes; 3-hop routes use a fixed direction
     // (reversing intermediate hops without re-evaluating the full chain is incorrect).
     let (flash_amount, route_flipped) = if route.len() == 2 {
         find_optimal_borrow_size_bidirectional(
-            &math_a, &math_b, i, j, aave_fee_bps as f64, aave_max, params.abs_cap_usd, gas_est,
+            &math_a, &math_b, i, j, borrow_fee_bps, aave_max, params.abs_cap_usd, gas_est,
         )
     } else {
         (find_optimal_borrow_size(
-            &math_a, &math_b, i, j, aave_fee_bps as f64, aave_max, params.abs_cap_usd, gas_est,
+            &math_a, &math_b, i, j, borrow_fee_bps, aave_max, params.abs_cap_usd, gas_est,
         ), false)
     };
     if flash_amount == 0 { return None; }
 
     let flash_usd = flash_amount as f64 / 1e6;
-    let aave_fee  = flash_usd * (aave_fee_bps as f64 / 10_000.0);
+    let flash_fee = flash_usd * (borrow_fee_bps / 10_000.0);
 
     // Use the effective pool direction chosen by the bidirectional search.
     let (eff_math_a, eff_math_b, eff_i, eff_j) = if route_flipped {
@@ -77,7 +82,7 @@ pub fn estimate_profit(
         amount
     };
 
-    let estimated_profit = out - flash_usd - aave_fee - gas_est;
+    let estimated_profit = out - flash_usd - flash_fee - gas_est;
     let effective_floor = params.effective_min_profit_usd(gas_est);
     if estimated_profit < effective_floor { return None; }
 
@@ -131,9 +136,10 @@ pub fn estimate_profit(
         gross_swap_profit_usd: out - flash_usd,
         estimated_profit_usd:  estimated_profit,
         simulated_profit_usd:  None,
-        aave_fee_usd:          Some(aave_fee),
+        aave_fee_usd:          Some(flash_fee),
         gas_cost_usd:          Some(gas_est),
         edge_trigger:          None,
+        flash_source,
     })
 }
 

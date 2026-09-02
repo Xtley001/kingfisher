@@ -213,5 +213,6 @@ fn make_template(
         aave_fee_usd:          Some(aave_fee),
         gas_cost_usd:          Some(template_gas_est),
         edge_trigger:          Some(label.into()),
+        flash_source:          kingfisher_core::types::FlashSource::Aave,
     })
 }

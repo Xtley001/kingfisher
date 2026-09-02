@@ -276,30 +276,7 @@ where
                     state2.write().await.push_opportunity(
                         kingfisher_scanner::to_event(opp, true)
                     );
-                    match kingfisher_executor::execute(opp, &network2, &state2).await {
-                        Ok(tx_result) => {
-                            let (success, profit, route, blk) = (
-                                tx_result.success, tx_result.profit_usd,
-                                opp.route_description.clone(), tx_result.block_target,
-                            );
-                            if let Some(ref hash) = tx_result.tx_hash {
-                                let sim_profit = opp.simulated_profit_usd.unwrap_or(0.0);
-                                state2.write().await.register_pending_bundle(hash.clone(), blk, sim_profit, opp.clone());
-                            }
-                            state2.write().await.push_tx_result(tx_result);
-                            if success {
-                                if let Some(p) = profit {
-                                    tokio::spawn(async move {
-                                        kingfisher_api::alerts::alert_trade_executed(p, &route, blk).await;
-                                    });
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(error = ?e, "Executor error");
-                            state2.write().await.consecutive_reverts += 1;
-                        }
-                    }
+                    execute_and_track(opp, &network2, &state2).await;
                 }
             }
         })
@@ -354,7 +331,7 @@ async fn run_edge_monitors(
             let net       = network.clone();
             let opp_clone = opp.clone();
             tokio::spawn(async move {
-                let _ = kingfisher_executor::execute(&opp_clone, &net, &state2).await;
+                execute_and_track(&opp_clone, &net, &state2).await;
             });
         }
     }
@@ -378,7 +355,7 @@ async fn run_edge_monitors(
                 let net       = network.clone();
                 let opp_clone = opp.clone();
                 tokio::spawn(async move {
-                    let _ = kingfisher_executor::execute(&opp_clone, &net, &state2).await;
+                    execute_and_track(&opp_clone, &net, &state2).await;
                 });
             }
         }
@@ -392,5 +369,42 @@ async fn run_edge_monitors(
     );
     if peg.any_stressed() {
         tracing::info!(usdc = usdc_peg, usdt = usdt_peg, "Edge: peg stress — scanning with relaxed params");
+    }
+}
+
+/// Unified execution and tracking helper.
+/// Executes the opportunity, registers pending bundles for LandingTracker confirmation,
+/// handles immediate submission failures, and trips the circuit breaker on errors.
+pub async fn execute_and_track(
+    opp: &kingfisher_core::types::Opportunity,
+    network: &Network,
+    state: &Arc<tokio::sync::RwLock<BotState>>,
+) {
+    match kingfisher_executor::execute(opp, network, state).await {
+        Ok(tx_result) => {
+            if let Some(ref hash) = tx_result.tx_hash {
+                let sim_profit = opp.simulated_profit_usd.unwrap_or(0.0);
+                state.write().await.register_pending_bundle(
+                    hash.clone(),
+                    tx_result.block_target,
+                    sim_profit,
+                    opp.clone(),
+                );
+                tracing::info!(
+                    tx_hash = %hash,
+                    route = %opp.route_description,
+                    target_block = tx_result.block_target,
+                    "📦 Bundle registered with LandingTracker"
+                );
+            } else if !tx_result.success {
+                // Immediate submission rejection (e.g. sequencer rejected)
+                kingfisher_api::persistence::append_trade(&tx_result);
+                state.write().await.push_tx_result(tx_result);
+            }
+        }
+        Err(e) => {
+            tracing::error!(error = ?e, route = %opp.route_description, "Executor error");
+            state.write().await.consecutive_reverts += 1;
+        }
     }
 }

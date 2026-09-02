@@ -41,9 +41,12 @@ contract DeployMainnet is Script {
 
         vm.startBroadcast(deployerKey);
 
-        // 3-arg constructor: operator = msg.sender (cold wallet) initially
+        address constant BALANCER_VAULT = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
+
+        // 4-arg constructor: operator = msg.sender (cold wallet) initially
         KingfisherArb arb = new KingfisherArb(
             AAVE_POOL,
+            BALANCER_VAULT,
             MIN_PROFIT_WEI,
             initialPools
         );

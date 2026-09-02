@@ -18,6 +18,7 @@ pub const USDC_E: &str = "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8";
 pub const CHAINLINK_USDC_USD: &str = "0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3";
 pub const CHAINLINK_USDT_USD: &str = "0x3f3f5dF88dC9F13eac63DF89EC16ef6e7E25DdE7";
 pub const CHAINLINK_ETH_USD: &str = "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612";
+pub const BALANCER_VAULT: &str = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
 
 fn addr_from_env_or(var_name: &str, default_hex: &str) -> Address {
     std::env::var(var_name)
@@ -28,6 +29,7 @@ fn addr_from_env_or(var_name: &str, default_hex: &str) -> Address {
 }
 
 pub fn aave_pool() -> Address { addr_from_env_or("AAVE_POOL_ADDR", AAVE_POOL) }
+pub fn balancer_vault() -> Address { addr_from_env_or("BALANCER_VAULT_ADDR", BALANCER_VAULT) }
 pub fn curve_factory() -> Address { addr_from_env_or("CURVE_FACTORY_ADDR", CURVE_FACTORY) }
 pub fn native_usdc() -> Address { addr_from_env_or("NATIVE_USDC_ADDR", NATIVE_USDC) }
 pub fn usdt() -> Address { addr_from_env_or("USDT_ADDR", USDT) }

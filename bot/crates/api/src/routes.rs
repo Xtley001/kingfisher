@@ -9,6 +9,7 @@ use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::time::{interval, Duration};
 
+use kingfisher_core::config::{FlashSourcePreference, SlippageModelParams};
 use crate::SharedState;
 
 // ─── Health ──────────────────────────────────────────────────────────────────
@@ -30,16 +31,23 @@ pub async fn get_state(State(state): State<SharedState>) -> impl IntoResponse {
 
 #[derive(Deserialize)]
 pub struct ParamUpdate {
-    pub min_profit_usd:     Option<f64>,
-    pub min_gas_roi:        Option<f64>,  // dynamic profit floor multiplier
-    pub min_imbalance_pct:  Option<f64>,
-    pub min_velocity:       Option<f64>,
-    pub gas_reserve_eth:    Option<f64>,
-    pub alert_gas_eth:      Option<f64>,
-    pub abs_cap_usd:        Option<f64>,
-    // LOW-04: gas_limit_override now patchable via dashboard, with floor validation.
-    // Setting this below 500_000 risks OOG on 4-hop routes (estimated 470k gas units).
-    pub gas_limit_override: Option<u64>,
+    pub min_profit_usd:                 Option<f64>,
+    pub min_gas_roi:                    Option<f64>,  // dynamic profit floor multiplier
+    pub min_imbalance_pct:              Option<f64>,
+    pub min_velocity:                   Option<f64>,
+    pub gas_reserve_eth:                Option<f64>,
+    pub alert_gas_eth:                  Option<f64>,
+    pub abs_cap_usd:                    Option<f64>,
+    pub gas_limit_override:             Option<u64>,
+    pub timeboost_min_profit_usd:       Option<f64>,
+    pub timeboost_race_loss_threshold:  Option<f64>,
+    pub stress_priority_fee_multiplier: Option<f64>,
+    pub gas_limit_2hop:                 Option<u64>,
+    pub gas_limit_4hop:                 Option<u64>,
+    pub calldata_cache_enabled:         Option<bool>,
+    pub presigned_pool_enabled:         Option<bool>,
+    pub flash_source_preference:        Option<FlashSourcePreference>,
+    pub slippage_model:                 Option<SlippageModelParams>,
 }
 
 /// PATCH /api/params — partial BotParams update, applied live, persisted to .env
@@ -90,28 +98,67 @@ pub async fn update_params(
         s.params.alert_gas_eth = v;
     }
     if let Some(v) = body.abs_cap_usd {
-        // HARD_CAP_USD raised to $25M — allow operator to set up to that ceiling.
-        // Zero-crossing search (P1), A-aware impact gate (P2), and golden-section search (P3)
-        // are the actual safety mechanism at this cap; the 40% ceiling that made $5M safe is gone.
-        // Do NOT raise above 25_000_000 without also raising HARD_CAP_USD in sizing.rs.
         if !v.is_finite() || !(1.0..=25_000_000.0).contains(&v) {
             return (StatusCode::BAD_REQUEST, "abs_cap_usd must be in [1.0, 25_000_000]").into_response();
+        }
+        if v > 10_000_000.0 {
+            tracing::warn!(abs_cap_usd = v, "⚠️ High abs_cap_usd requested (> $10M ceiling)");
         }
         s.params.abs_cap_usd = v;
     }
     if let Some(v) = body.gas_limit_override {
-        // LOW-04 fix: guard against setting gas limit below minimum safe value.
-        // 4-hop route = 150k + 80k*4 = 470k algebraic estimate; 500k is the safe floor.
-        // If the limit is set below this and a 4-hop route fires, the flash loan is taken,
-        // the swap loop runs OOG mid-execution, and the tx reverts — wasting gas.
-        if v < 500_000 {
-            return (StatusCode::BAD_REQUEST,
-                "gas_limit_override must be >= 500_000 (4-hop routes require ~470k gas units)").into_response();
-        }
-        if v > 5_000_000 {
-            return (StatusCode::BAD_REQUEST, "gas_limit_override must be <= 5_000_000").into_response();
+        if !(200_000..=5_000_000).contains(&v) {
+            return (StatusCode::BAD_REQUEST, "gas_limit_override must be in [200_000, 5_000_000]").into_response();
         }
         s.params.gas_limit_override = v;
+    }
+    if let Some(v) = body.timeboost_min_profit_usd {
+        if !v.is_finite() || v < 0.0 {
+            return (StatusCode::BAD_REQUEST, "timeboost_min_profit_usd must be >= 0.0").into_response();
+        }
+        s.params.timeboost_min_profit_usd = v;
+    }
+    if let Some(v) = body.timeboost_race_loss_threshold {
+        if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+            return (StatusCode::BAD_REQUEST, "timeboost_race_loss_threshold must be in [0.0, 1.0]").into_response();
+        }
+        s.params.timeboost_race_loss_threshold = v;
+    }
+    if let Some(v) = body.stress_priority_fee_multiplier {
+        if !v.is_finite() || !(0.0..=2.0).contains(&v) {
+            return (StatusCode::BAD_REQUEST, "stress_priority_fee_multiplier must be in [0.0, 2.0]").into_response();
+        }
+        s.params.stress_priority_fee_multiplier = v;
+    }
+    if let Some(v) = body.gas_limit_2hop {
+        if !(200_000..=2_000_000).contains(&v) {
+            return (StatusCode::BAD_REQUEST, "gas_limit_2hop must be in [200_000, 2_000_000]").into_response();
+        }
+        s.params.gas_limit_2hop = v;
+    }
+    if let Some(v) = body.gas_limit_4hop {
+        if !(400_000..=5_000_000).contains(&v) {
+            return (StatusCode::BAD_REQUEST, "gas_limit_4hop must be in [400_000, 5_000_000]").into_response();
+        }
+        s.params.gas_limit_4hop = v;
+    }
+    if let Some(v) = body.calldata_cache_enabled {
+        s.params.calldata_cache_enabled = v;
+    }
+    if let Some(v) = body.presigned_pool_enabled {
+        s.params.presigned_pool_enabled = v;
+    }
+    if let Some(v) = body.flash_source_preference {
+        s.params.flash_source_preference = v;
+    }
+    if let Some(v) = body.slippage_model {
+        if v.hard_cap > 0.03 || v.hard_cap <= 0.0 {
+            return (StatusCode::BAD_REQUEST, "slippage_model.hard_cap cannot exceed 0.03 (3% safety ceiling)").into_response();
+        }
+        if v.depth_base < 0.0 || v.depth_shallow < 0.0 || v.time_drift_rate < 0.0 || v.time_drift_cap < 0.0 || v.size_ratio_weight < 0.0 {
+            return (StatusCode::BAD_REQUEST, "slippage_model weights must be non-negative").into_response();
+        }
+        s.params.slippage_model = v;
     }
 
     tracing::info!(params = ?s.params, "Parameters updated via dashboard");
@@ -229,7 +276,7 @@ pub async fn ws_handler(
         .map(|s| s.trim())
         .unwrap_or("");
 
-    if provided_key != api_key.as_str() {
+    if !crate::auth::constant_time_eq(provided_key, &api_key) {
         return (StatusCode::UNAUTHORIZED, "Invalid or missing API key in Sec-WebSocket-Protocol").into_response();
     }
 

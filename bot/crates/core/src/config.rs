@@ -265,28 +265,114 @@ pub struct BotParams {
     /// Emergency borrow ceiling. Sizing is automatic; this is a last-resort guard.
     pub abs_cap_usd: f64,          // Default: 5_000_000.0 ($5M — raise empirically after measuring live P&L)
 
-    /// Gas limit for arb transactions. Tunable without recompile.
-    /// 750k accommodates 4-hop routes through meta-pools with headroom to spare.
+    /// Gas limit for arb transactions (deprecated global fallback).
+    #[serde(default = "default_gas_limit_override")]
     pub gas_limit_override: u64,   // Default: 750_000
+
+    /// Minimum simulated profit to justify routing via Timeboost express lane.
+    #[serde(default = "default_timeboost_min_profit_usd")]
+    pub timeboost_min_profit_usd: f64, // Default: 75.0
+
+    /// Race-loss rate threshold (0.0 to 1.0) to trigger Timeboost bidding.
+    #[serde(default = "default_timeboost_race_loss_threshold")]
+    pub timeboost_race_loss_threshold: f64, // Default: 0.25 (25%)
+
+    /// Stress priority fee multiplier applied to base_fee (default: 0.25 = 25%).
+    #[serde(default = "default_stress_priority_fee_multiplier")]
+    pub stress_priority_fee_multiplier: f64, // Default: 0.25
+
+    /// Gas limit for 2-hop routes.
+    #[serde(default = "default_gas_limit_2hop")]
+    pub gas_limit_2hop: u64,       // Default: 350_000
+
+    /// Gas limit for 3/4-hop routes.
+    #[serde(default = "default_gas_limit_4hop")]
+    pub gas_limit_4hop: u64,       // Default: 750_000
+
+    /// Kill-switch for in-memory calldata cache.
+    #[serde(default = "default_calldata_cache_enabled")]
+    pub calldata_cache_enabled: bool, // Default: true
+
+    /// Kill-switch for pre-signed transaction pool.
+    #[serde(default = "default_presigned_pool_enabled")]
+    pub presigned_pool_enabled: bool, // Default: true
+
+    /// Preferred flash loan source (Balancer 0% vs Aave).
+    #[serde(default = "default_flash_source_preference")]
+    pub flash_source_preference: FlashSourcePreference,
+
+    /// Tunable dynamic slippage model parameters.
+    #[serde(default = "default_slippage_model")]
+    pub slippage_model: SlippageModelParams,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FlashSourcePreference {
+    AaveOnly,
+    #[default]
+    BalancerPreferred,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SlippageModelParams {
+    pub depth_base: f64,        // default 0.003
+    pub depth_shallow: f64,     // default 0.012
+    pub time_drift_rate: f64,   // default 0.0002
+    pub time_drift_cap: f64,    // default 0.005
+    pub size_ratio_weight: f64, // default 0.02
+    pub hard_cap: f64,          // default 0.03
+}
+
+impl Default for SlippageModelParams {
+    fn default() -> Self {
+        Self {
+            depth_base: 0.003,
+            depth_shallow: 0.012,
+            time_drift_rate: 0.0002,
+            time_drift_cap: 0.005,
+            size_ratio_weight: 0.02,
+            hard_cap: 0.03,
+        }
+    }
 }
 
 impl Default for BotParams {
     fn default() -> Self {
         Self {
-            min_profit_usd:    10.0,   // absolute floor; effective floor = max(10, gas×3)
-            min_gas_roi:       3.0,    // 300% ROI on gas minimum
-            min_imbalance_pct: 5.0,
-            min_velocity:      0.015,
-            gas_reserve_eth:   0.10,
-            alert_gas_eth:     0.30,
-            abs_cap_usd:       5_000_000.0,
-            gas_limit_override: 750_000,
+            min_profit_usd:                 10.0,   // absolute floor; effective floor = max(10, gas×3)
+            min_gas_roi:                    3.0,    // 300% ROI on gas minimum
+            min_imbalance_pct:              5.0,
+            min_velocity:                   0.015,
+            gas_reserve_eth:                0.10,
+            alert_gas_eth:                  0.30,
+            abs_cap_usd:                    5_000_000.0,
+            gas_limit_override:             750_000,
+            timeboost_min_profit_usd:       75.0,
+            timeboost_race_loss_threshold:  0.25,
+            stress_priority_fee_multiplier: 0.25,
+            gas_limit_2hop:                 350_000,
+            gas_limit_4hop:                 750_000,
+            calldata_cache_enabled:         true,
+            presigned_pool_enabled:         true,
+            flash_source_preference:        FlashSourcePreference::BalancerPreferred,
+            slippage_model:                 SlippageModelParams::default(),
         }
     }
 }
 
-/// Serde field default for `min_gas_roi` (backward-compatible with older params.json). Returns 3.0.
+/// Serde field defaults for backward-compatibility with older params.json.
 fn default_min_gas_roi() -> f64 { 3.0 }
+fn default_gas_limit_override() -> u64 { 750_000 }
+fn default_timeboost_min_profit_usd() -> f64 { 75.0 }
+fn default_timeboost_race_loss_threshold() -> f64 { 0.25 }
+fn default_stress_priority_fee_multiplier() -> f64 { 0.25 }
+fn default_gas_limit_2hop() -> u64 { 350_000 }
+fn default_gas_limit_4hop() -> u64 { 750_000 }
+fn default_calldata_cache_enabled() -> bool { true }
+fn default_presigned_pool_enabled() -> bool { true }
+fn default_flash_source_preference() -> FlashSourcePreference { FlashSourcePreference::BalancerPreferred }
+fn default_slippage_model() -> SlippageModelParams { SlippageModelParams::default() }
 
 impl BotParams {
     /// Effective profit floor for a given gas cost.
@@ -295,6 +381,15 @@ impl BotParams {
     /// has acceptable ROI relative to gas spend, not just an absolute dollar floor.
     pub fn effective_min_profit_usd(&self, gas_cost_usd: f64) -> f64 {
         self.min_profit_usd.max(gas_cost_usd * self.min_gas_roi)
+    }
+
+    /// Select gas limit based on route hop count.
+    pub fn gas_limit_for_route(&self, hops_count: usize) -> u64 {
+        if hops_count <= 2 {
+            self.gas_limit_2hop
+        } else {
+            self.gas_limit_4hop
+        }
     }
 
     pub fn from_env() -> Self {
@@ -323,14 +418,30 @@ impl BotParams {
                 }
             };
         }
-        load!(min_profit_usd,    "MIN_PROFIT_USD");
-        load!(min_gas_roi,       "MIN_GAS_ROI");
-        load!(min_imbalance_pct, "MIN_IMBALANCE_PCT");
-        load!(min_velocity,      "MIN_VELOCITY");
-        load!(gas_reserve_eth,   "GAS_RESERVE_ETH");
-        load!(alert_gas_eth,     "ALERT_GAS_ETH");
-        load!(abs_cap_usd,        "ABS_CAP_USD");
-        load!(gas_limit_override, "GAS_LIMIT_OVERRIDE");
+        load!(min_profit_usd,                 "MIN_PROFIT_USD");
+        load!(min_gas_roi,                    "MIN_GAS_ROI");
+        load!(min_imbalance_pct,              "MIN_IMBALANCE_PCT");
+        load!(min_velocity,                   "MIN_VELOCITY");
+        load!(gas_reserve_eth,                "GAS_RESERVE_ETH");
+        load!(alert_gas_eth,                  "ALERT_GAS_ETH");
+        load!(abs_cap_usd,                    "ABS_CAP_USD");
+        load!(gas_limit_override,             "GAS_LIMIT_OVERRIDE");
+        load!(timeboost_min_profit_usd,       "TIMEBOOST_MIN_PROFIT_USD");
+        load!(timeboost_race_loss_threshold,  "TIMEBOOST_RACE_LOSS_THRESHOLD");
+        load!(stress_priority_fee_multiplier, "STRESS_PRIORITY_FEE_MULTIPLIER");
+        load!(gas_limit_2hop,                 "GAS_LIMIT_2HOP");
+        load!(gas_limit_4hop,                 "GAS_LIMIT_4HOP");
+        load!(calldata_cache_enabled,         "CALLDATA_CACHE_ENABLED");
+        load!(presigned_pool_enabled,         "PRESIGNED_POOL_ENABLED");
+
+        if let Ok(v) = std::env::var("FLASH_SOURCE_PREFERENCE") {
+            if v.eq_ignore_ascii_case("aave_only") {
+                p.flash_source_preference = FlashSourcePreference::AaveOnly;
+            } else if v.eq_ignore_ascii_case("balancer_preferred") {
+                p.flash_source_preference = FlashSourcePreference::BalancerPreferred;
+            }
+        }
+
         p
     }
 }
