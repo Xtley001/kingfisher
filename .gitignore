@@ -37,3 +37,8 @@ contracts/lib/
 
 # Lockfile backups
 Cargo.lock.bak
+
+# Local review/working notes — not part of the shipped repo
+UPDATE.md
+update.md
+*.working.md

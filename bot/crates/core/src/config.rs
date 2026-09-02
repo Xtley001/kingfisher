@@ -1,5 +1,6 @@
 use alloy::primitives::Address;
 use serde::{Deserialize, Serialize};
+use crate::venues;
 
 /// Resolve the persistent data directory used for `params.json` and `trades.jsonl`.
 ///
@@ -52,8 +53,8 @@ impl Network {
 
     pub fn aave_pool(&self) -> Address {
         match self {
-            Network::Testnet => "0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff".parse().unwrap(),
-            Network::Mainnet => "0x794a61358D6845594F94dc1DB02A252b5b4814aD".parse().unwrap(),
+            Network::Testnet => std::env::var("AAVE_POOL_ADDR").ok().filter(|s| !s.is_empty()).and_then(|s| s.parse().ok()).unwrap_or_else(|| "0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff".parse().unwrap()),
+            Network::Mainnet => venues::arbitrum::aave_pool(),
             Network::Monad   => Address::ZERO,
         }
     }
@@ -72,48 +73,40 @@ impl Network {
 
     pub fn usdc_address(&self) -> Address {
         match self {
-            // Aave V3 on Arbitrum uses native USDC (Circle-issued, 0xaf88d...).
-            // USDC.e (0xFF970...) is the deprecated bridged token — Aave holds no reserves.
-            Network::Testnet => "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d".parse().unwrap(),
-            Network::Mainnet => "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".parse().unwrap(),
+            Network::Testnet => std::env::var("USDC_ADDR").ok().filter(|s| !s.is_empty()).and_then(|s| s.parse().ok()).unwrap_or_else(|| "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d".parse().unwrap()),
+            Network::Mainnet => venues::arbitrum::native_usdc(),
             Network::Monad   => std::env::var("USDC").unwrap_or_default().parse().unwrap_or(Address::ZERO),
         }
     }
 
     pub fn chainlink_eth_usd(&self) -> Address {
         match self {
-            Network::Testnet => "0xd30e2101a97dcbAeBCBC04F14C3f624E67A35165".parse().unwrap(), // Arbitrum Sepolia ETH/USD
-            Network::Mainnet => "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612".parse().unwrap(), // Arbitrum One ETH/USD
+            Network::Testnet => std::env::var("CHAINLINK_ETH_USD_ADDR").ok().filter(|s| !s.is_empty()).and_then(|s| s.parse().ok()).unwrap_or_else(|| "0xd30e2101a97dcbAeBCBC04F14C3f624E67A35165".parse().unwrap()),
+            Network::Mainnet => venues::arbitrum::chainlink_eth_usd(),
             Network::Monad   => Address::ZERO,
         }
     }
 
-    /// Chainlink USDC/USD feed. Used for peg-stress detection. A failed/stale read is
-    /// treated as a neutral 1.0 peg (see multicall.rs), so a testnet gap is non-fatal.
     pub fn chainlink_usdc_usd(&self) -> Address {
         match self {
-            Network::Testnet => "0x0153002d20B96532C639313c2d54c3dA09109309".parse().unwrap(), // Sepolia USDC/USD (best-effort)
-            Network::Mainnet => "0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3".parse().unwrap(), // Arbitrum One USDC/USD
+            Network::Testnet => std::env::var("CHAINLINK_USDC_USD_ADDR").ok().filter(|s| !s.is_empty()).and_then(|s| s.parse().ok()).unwrap_or_else(|| "0x0153002d20B96532C639313c2d54c3dA09109309".parse().unwrap()),
+            Network::Mainnet => venues::arbitrum::chainlink_usdc_usd(),
             Network::Monad   => Address::ZERO,
         }
     }
 
-    /// Chainlink USDT/USD feed. Used for peg-stress detection (neutral 1.0 on failure).
     pub fn chainlink_usdt_usd(&self) -> Address {
         match self {
-            Network::Testnet => "0x0a023a3423D9b27A0BE48c768CCF2dD7877fEf5E".parse().unwrap(), // Sepolia USDT/USD (best-effort)
-            Network::Mainnet => "0x3f3f5dF88dC9F13eac63DF89EC16ef6e7E25DdE7".parse().unwrap(), // Arbitrum One USDT/USD
+            Network::Testnet => std::env::var("CHAINLINK_USDT_USD_ADDR").ok().filter(|s| !s.is_empty()).and_then(|s| s.parse().ok()).unwrap_or_else(|| "0x0a023a3423D9b27A0BE48c768CCF2dD7877fEf5E".parse().unwrap()),
+            Network::Mainnet => venues::arbitrum::chainlink_usdt_usd(),
             Network::Monad   => Address::ZERO,
         }
     }
 
-    /// Curve pool factory for auto-discovery. `None` disables discovery (testnet).
-    /// Verify the mainnet address on Arbiscan before relying on discovered pools —
-    /// discovery only flags candidates; trading still requires manual allowlisting.
     pub fn curve_factory(&self) -> Option<Address> {
         match self {
             Network::Testnet => None,
-            Network::Mainnet => "0xb17b674D9c5CB2e441F8e196a2f048A81355d031".parse().ok(), // Curve factory on Arbitrum One
+            Network::Mainnet => Some(venues::arbitrum::curve_factory()),
             Network::Monad   => None,
         }
     }
@@ -155,17 +148,17 @@ fn mainnet_pools() -> Vec<PoolConfig> {
     vec![
         PoolConfig {
             name:    "FRAX-USDC".into(),
-            address: "0xC9B8a3FDECB9D5b218d02555a8Baf332E5B740d5".parse().unwrap(),
+            address: venues::arbitrum::frax_usdc_pool(),
             tokens: vec![
                 TokenConfig {
                     symbol:   "FRAX".into(),
-                    address:  "0x17FC002b466eEc40DaE837Fc4bE5c67993ddBd6F".parse().unwrap(),
+                    address:  venues::arbitrum::frax(),
                     decimals: 18,
                     index:    0,
                 },
                 TokenConfig {
                     symbol:   "USDC.e".into(),
-                    address:  "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8".parse().unwrap(),
+                    address:  venues::arbitrum::usdc_e(),
                     decimals: 6,
                     index:    1,
                 },
@@ -175,17 +168,17 @@ fn mainnet_pools() -> Vec<PoolConfig> {
         },
         PoolConfig {
             name:    "crvUSD-USDC".into(),
-            address: "0xec090cf6DD891D2d014beA6edAda6e05E025D93d".parse().unwrap(),
+            address: venues::arbitrum::crvusd_usdc_pool(),
             tokens: vec![
                 TokenConfig {
                     symbol:   "crvUSD".into(),
-                    address:  "0x498Bf2B1e120FeD3ad3D42EA2165E9b73f99C1e5".parse().unwrap(),
+                    address:  venues::arbitrum::crvusd_token(),
                     decimals: 18,
                     index:    0,
                 },
                 TokenConfig {
                     symbol:   "USDC".into(),
-                    address:  "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".parse().unwrap(),
+                    address:  venues::arbitrum::native_usdc(),
                     decimals: 6,
                     index:    1,
                 },
@@ -195,17 +188,17 @@ fn mainnet_pools() -> Vec<PoolConfig> {
         },
         PoolConfig {
             name:    "crvUSD-USDT".into(),
-            address: "0x73aF1150F265419Ef8a5DB41908B700C32D49135".parse().unwrap(),
+            address: venues::arbitrum::crvusd_usdt_pool(),
             tokens: vec![
                 TokenConfig {
                     symbol:   "crvUSD".into(),
-                    address:  "0x498Bf2B1e120FeD3ad3D42EA2165E9b73f99C1e5".parse().unwrap(),
+                    address:  venues::arbitrum::crvusd_token(),
                     decimals: 18,
                     index:    0,
                 },
                 TokenConfig {
                     symbol:   "USDT".into(),
-                    address:  "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9".parse().unwrap(),
+                    address:  venues::arbitrum::usdt(),
                     decimals: 6,
                     index:    1,
                 },
@@ -215,17 +208,17 @@ fn mainnet_pools() -> Vec<PoolConfig> {
         },
         PoolConfig {
             name:    "2pool".into(),
-            address: "0x7f90122BF0700F9E7e1F688fe926940E8839F353".parse().unwrap(),
+            address: venues::arbitrum::twopool(),
             tokens: vec![
                 TokenConfig {
                     symbol:   "USDC.e".into(),
-                    address:  "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8".parse().unwrap(),
+                    address:  venues::arbitrum::usdc_e(),
                     decimals: 6,
                     index:    0,
                 },
                 TokenConfig {
                     symbol:   "USDT".into(),
-                    address:  "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9".parse().unwrap(),
+                    address:  venues::arbitrum::usdt(),
                     decimals: 6,
                     index:    1,
                 },

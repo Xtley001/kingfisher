@@ -19,18 +19,26 @@ pub const CHAINLINK_USDC_USD: &str = "0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3
 pub const CHAINLINK_USDT_USD: &str = "0x3f3f5dF88dC9F13eac63DF89EC16ef6e7E25DdE7";
 pub const CHAINLINK_ETH_USD: &str = "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612";
 
-pub fn aave_pool() -> Address { AAVE_POOL.parse().unwrap() }
-pub fn curve_factory() -> Address { CURVE_FACTORY.parse().unwrap() }
-pub fn native_usdc() -> Address { NATIVE_USDC.parse().unwrap() }
-pub fn usdt() -> Address { USDT.parse().unwrap() }
-pub fn frax() -> Address { FRAX.parse().unwrap() }
-pub fn crvusd_token() -> Address { CRVUSD_TOKEN.parse().unwrap() }
-pub fn llamma_weth_controller() -> Address { LLAMMA_WETH_CONTROLLER.parse().unwrap() }
-pub fn crvusd_usdc_pool() -> Address { CRVUSD_USDC_POOL.parse().unwrap() }
-pub fn crvusd_usdt_pool() -> Address { CRVUSD_USDT_POOL.parse().unwrap() }
-pub fn frax_usdc_pool() -> Address { FRAX_USDC_POOL.parse().unwrap() }
-pub fn twopool() -> Address { TWOPOOL.parse().unwrap() }
-pub fn usdc_e() -> Address { USDC_E.parse().unwrap() }
-pub fn chainlink_usdc_usd() -> Address { CHAINLINK_USDC_USD.parse().unwrap() }
-pub fn chainlink_usdt_usd() -> Address { CHAINLINK_USDT_USD.parse().unwrap() }
-pub fn chainlink_eth_usd() -> Address { CHAINLINK_ETH_USD.parse().unwrap() }
+fn addr_from_env_or(var_name: &str, default_hex: &str) -> Address {
+    std::env::var(var_name)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| default_hex.parse().unwrap())
+}
+
+pub fn aave_pool() -> Address { addr_from_env_or("AAVE_POOL_ADDR", AAVE_POOL) }
+pub fn curve_factory() -> Address { addr_from_env_or("CURVE_FACTORY_ADDR", CURVE_FACTORY) }
+pub fn native_usdc() -> Address { addr_from_env_or("NATIVE_USDC_ADDR", NATIVE_USDC) }
+pub fn usdt() -> Address { addr_from_env_or("USDT_ADDR", USDT) }
+pub fn frax() -> Address { addr_from_env_or("FRAX_ADDR", FRAX) }
+pub fn crvusd_token() -> Address { addr_from_env_or("CRVUSD_ADDR", CRVUSD_TOKEN) }
+pub fn llamma_weth_controller() -> Address { addr_from_env_or("LLAMMA_WETH_CONTROLLER_ADDR", LLAMMA_WETH_CONTROLLER) }
+pub fn crvusd_usdc_pool() -> Address { addr_from_env_or("POOL_CRVUSD_USDC_ADDR", CRVUSD_USDC_POOL) }
+pub fn crvusd_usdt_pool() -> Address { addr_from_env_or("POOL_CRVUSD_USDT_ADDR", CRVUSD_USDT_POOL) }
+pub fn frax_usdc_pool() -> Address { addr_from_env_or("POOL_FRAXBP_ADDR", FRAX_USDC_POOL) }
+pub fn twopool() -> Address { addr_from_env_or("POOL_TWOPOOL_ADDR", TWOPOOL) }
+pub fn usdc_e() -> Address { addr_from_env_or("USDC_E_ADDR", USDC_E) }
+pub fn chainlink_usdc_usd() -> Address { addr_from_env_or("CHAINLINK_USDC_USD_ADDR", CHAINLINK_USDC_USD) }
+pub fn chainlink_usdt_usd() -> Address { addr_from_env_or("CHAINLINK_USDT_USD_ADDR", CHAINLINK_USDT_USD) }
+pub fn chainlink_eth_usd() -> Address { addr_from_env_or("CHAINLINK_ETH_USD_ADDR", CHAINLINK_ETH_USD) }
