@@ -1,3 +1,4 @@
+use alloy::primitives::Address;
 use kingfisher_core::{config::BotParams, types::{PoolState, Opportunity, RouteHop}};
 use kingfisher_simulation::spread::StableSwapMath;
 use kingfisher_simulation::sizing::{find_optimal_borrow_size, find_optimal_borrow_size_bidirectional};
@@ -39,11 +40,11 @@ pub fn estimate_profit(
     // (reversing intermediate hops without re-evaluating the full chain is incorrect).
     let (flash_amount, route_flipped) = if route.len() == 2 {
         find_optimal_borrow_size_bidirectional(
-            &math_a, &math_b, i, j, aave_fee_bps as f64 / 100.0, aave_max, params.abs_cap_usd, gas_est,
+            &math_a, &math_b, i, j, aave_fee_bps as f64, aave_max, params.abs_cap_usd, gas_est,
         )
     } else {
         (find_optimal_borrow_size(
-            &math_a, &math_b, i, j, aave_fee_bps as f64 / 100.0, aave_max, params.abs_cap_usd, gas_est,
+            &math_a, &math_b, i, j, aave_fee_bps as f64, aave_max, params.abs_cap_usd, gas_est,
         ), false)
     };
     if flash_amount == 0 { return None; }
@@ -86,15 +87,47 @@ pub fn estimate_profit(
         pool_a.tokens.get(eff_i).map(|t| t.address)?
     };
 
+    let mut effective_route = route.to_vec();
+    if route_flipped {
+        effective_route.reverse();
+        for hop in &mut effective_route {
+            std::mem::swap(&mut hop.token_in_index, &mut hop.token_out_index);
+        }
+        if let Some(h0) = effective_route.get_mut(0) {
+            h0.token_in = pool_b.tokens.get(eff_i).map(|t| t.address).unwrap_or(flash_token);
+        }
+        if let Some(h1) = effective_route.get_mut(1) {
+            h1.token_in = pool_a.tokens.get(eff_j).map(|t| t.address).unwrap_or(Address::ZERO);
+        }
+    }
+
+    // Populate amount_in and expected_out for slippage protection
+    if effective_route.len() == 2 {
+        let dec_mid = if route_flipped {
+            pool_b.tokens.get(eff_j).map(|t| t.decimals).unwrap_or(6)
+        } else {
+            pool_a.tokens.get(eff_j).map(|t| t.decimals).unwrap_or(6)
+        };
+        let dec_out = if route_flipped {
+            pool_b.tokens.get(eff_i).map(|t| t.decimals).unwrap_or(6)
+        } else {
+            pool_a.tokens.get(eff_i).map(|t| t.decimals).unwrap_or(6)
+        };
+
+        effective_route[0].amount_in = flash_amount;
+        effective_route[0].expected_out = (mid * 10f64.powi(dec_mid as i32)) as u128;
+        effective_route[1].amount_in = effective_route[0].expected_out;
+        effective_route[1].expected_out = (out * 10f64.powi(dec_out as i32)) as u128;
+    }
+
     Some(Opportunity {
         id:                    uuid::Uuid::new_v4().to_string(),
         block_number:          block,
         detected_at:           chrono::Utc::now(),
-        route:                 route.to_vec(),
-        route_description:     describe(route, pool_states),
+        route_description:     describe(&effective_route, pool_states),
+        route:                 effective_route,
         flash_token,
         flash_amount,
-        // Store gross profit so the simulation layer re-derives net without double-subtracting.
         gross_swap_profit_usd: out - flash_usd,
         estimated_profit_usd:  estimated_profit,
         simulated_profit_usd:  None,

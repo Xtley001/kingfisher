@@ -93,6 +93,7 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
      */
     struct Hop {
         address pool;
+        address tokenIn;
         int128  tokenInIndex;
         int128  tokenOutIndex;
         bool    isMetaPool;
@@ -159,7 +160,7 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
         uint256        flashAmount,
         Hop[] calldata hops,
         uint256        minProfit
-    ) external onlyOperator nonReentrant {
+    ) external onlyOperator nonReentrant returns (uint256 netProfit) {
         if (paused)       revert ContractPaused();
         if (flashAmount == 0) revert ZeroAmount();
         if (hops.length < 2 || hops.length > MAX_HOPS)
@@ -170,6 +171,8 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
                 revert PoolNotAllowed(hops[i].pool);
             if (ICurvePool(hops[i].pool).get_virtual_price() < 1e18)
                 revert PoolUnhealthy(hops[i].pool);
+            if (hops[i].tokenIn == address(0))
+                revert ZeroAddress();
             if (hops[i].minAmountOut == 0)
                 revert ZeroMinAmountOut(i);
         }
@@ -177,6 +180,9 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
         bytes memory params = abi.encode(RouteParams({hops: hops, minProfit: minProfit}));
 
         AAVE_POOL.flashLoanSimple(address(this), flashToken, flashAmount, params, 0);
+
+        // Return accumulated profit for off-chain eth_call inspection
+        netProfit = IERC20(flashToken).balanceOf(address(this));
     }
 
     // ─── Aave V3 Callback ────────────────────────────────────────────────────
@@ -184,12 +190,9 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
     /**
      * @notice Called by Aave after sending the flash loan.
      *
-     * @dev Item #10: Yul assembly hot path for the security checks.
-     *      The two caller checks run on every trade — shaving 2,400 gas here
-     *      compounds at 100+ trades/day.
-     *
-     *      BEFORE (Solidity string requires): ~2,600 gas
-     *      AFTER  (Yul assembly):              ~200 gas
+     * @dev Notice: nonReentrant is omitted here because executeArb() holds the lock
+     *      and Aave re-enters via this callback. Security against unauthorized entry
+     *      is strictly enforced below via caller == AAVE_POOL and initiator == address(this).
      */
     function executeOperation(
         address        asset,
@@ -197,21 +200,18 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
         uint256        premium,
         address        initiator,
         bytes calldata params
-    ) external override nonReentrant returns (bool) {
+    ) external override returns (bool) {
 
         // Item #10: Tight caller + initiator checks.
-        // For immutables, Solidity with custom errors is already optimal (~300 gas).
-        // The Yul block is retained for the jump-table benefit on the initiator check.
         {
             address _aavePool = address(AAVE_POOL);
             assembly {
                 // if (msg.sender != AAVE_POOL) revert NotAavePool() selector
                 if iszero(eq(caller(), _aavePool)) {
-                    // NotAavePool() = keccak256("NotAavePool()")[0:4] = 0x9f87fad7
                     mstore(0x00, 0x9f87fad700000000000000000000000000000000000000000000000000000000)
                     revert(0x00, 0x04)
                 }
-                // if (initiator != address(this)) revert BadInitiator() = 0x5c5eb8de
+                // if (initiator != address(this)) revert BadInitiator()
                 if iszero(eq(initiator, address())) {
                     mstore(0x00, 0x5c5eb8de00000000000000000000000000000000000000000000000000000000)
                     revert(0x00, 0x04)
@@ -227,11 +227,11 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
         for (uint256 i = 0; i < route.hops.length; i++) {
             Hop memory hop = route.hops[i];
 
-            address tokenIn  = ICurvePool(hop.pool).coins(uint256(uint128(hop.tokenInIndex)));
+            address tokenIn  = hop.tokenIn;
             uint256 amountIn = IERC20(tokenIn).balanceOf(address(this));
             if (amountIn == 0) revert ZeroInputAtHop(i);
 
-            // Item #10: assembly token transfer/approve — saves ~300 gas per hop
+            // Assembly token transfer/approve — saves ~300 gas per hop
             _approve(tokenIn, hop.pool, amountIn);
 
             if (hop.isMetaPool) {
@@ -328,15 +328,20 @@ contract KingfisherArb is IFlashLoanSimpleReceiver, Ownable2Step {
         emit PausedUpdated(_paused);
     }
 
-    /// Withdraw profit to owner (cold wallet). Item #21: called directly by cold wallet.
-    function withdrawProfit(address token) external onlyOwner {
+    modifier onlyOperatorOrOwner() {
+        if (msg.sender != owner() && msg.sender != operator) revert NotOperator();
+        _;
+    }
+
+    /// Withdraw profit to owner (cold wallet). Can be triggered by owner or operator bot.
+    function withdrawProfit(address token) external onlyOperatorOrOwner {
         uint256 balance = IERC20(token).balanceOf(address(this));
         if (balance == 0) revert NothingToWithdraw(token);
         IERC20(token).safeTransfer(owner(), balance);
         emit ProfitWithdrawn(token, balance, owner());
     }
 
-    function withdrawProfitBatch(address[] calldata tokens) external onlyOwner {
+    function withdrawProfitBatch(address[] calldata tokens) external onlyOperatorOrOwner {
         for (uint256 i = 0; i < tokens.length; i++) {
             uint256 bal = IERC20(tokens[i]).balanceOf(address(this));
             if (bal > 0) {

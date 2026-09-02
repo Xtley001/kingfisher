@@ -162,6 +162,7 @@ pub struct Opportunity {
 pub struct RouteHop {
     pub pool:            Address,
     pub pool_name:       String,
+    pub token_in:        Address,
     pub token_in_index:  i128,
     pub token_out_index: i128,
     pub is_meta:         bool,

@@ -20,6 +20,29 @@ interface IAavePool {
         bytes calldata params,
         uint16 referralCode
     ) external;
+
+    /**
+     * @notice Liquidate an unhealthy borrow position (Strategy A6).
+     */
+    function liquidationCall(
+        address collateralAsset,
+        address debtAsset,
+        address user,
+        uint256 debtToCover,
+        bool receiveAToken
+    ) external;
+
+    /**
+     * @notice Fetch user collateral, debt, and health factor.
+     */
+    function getUserAccountData(address user) external view returns (
+        uint256 totalCollateralBase,
+        uint256 totalDebtBase,
+        uint256 availableBorrowsBase,
+        uint256 currentLiquidationThreshold,
+        uint256 ltv,
+        uint256 healthFactor
+    );
 }
 
 interface IFlashLoanSimpleReceiver {

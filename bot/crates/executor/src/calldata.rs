@@ -23,6 +23,7 @@ use kingfisher_core::types::{Opportunity, PoolState};
 sol! {
     struct Hop {
         address pool;
+        address tokenIn;
         int128  tokenInIndex;
         int128  tokenOutIndex;
         bool    isMetaPool;
@@ -34,7 +35,7 @@ sol! {
         uint256 flashAmount,
         Hop[]   hops,
         uint256 minProfit
-    ) external;
+    ) external returns (uint256 netProfit);
 }
 
 /// ABI-encode `KingfisherArb.executeArb()` using the `sol!` macro.
@@ -56,15 +57,24 @@ pub fn encode_execute_arb(
         let blocks_since_scan = current_block.saturating_sub(opp.block_number);
         let flash_usd = opp.flash_amount as f64 / 1e6;
 
+        let effective_expected = if h.expected_out > 0 {
+            h.expected_out
+        } else if h.amount_in > 0 {
+            h.amount_in * 99 / 100
+        } else {
+            1
+        };
+
         let min_out = dynamic_min_amount_out(
-            h.expected_out,
+            effective_expected,
             pool_depth_usd,
             blocks_since_scan,
             flash_usd,
-        );
+        ).max(1);
 
         Hop {
             pool:           h.pool,
+            tokenIn:        h.token_in,
             tokenInIndex:   h.token_in_index,
             tokenOutIndex:  h.token_out_index,
             isMetaPool:     h.is_meta,

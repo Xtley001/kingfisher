@@ -21,13 +21,18 @@ pub fn data_dir() -> String {
 pub enum Network {
     Testnet,  // Arbitrum Sepolia — chain_id 421614
     Mainnet,  // Arbitrum One    — chain_id 42161
+    Monad,    // Monad Mainnet   — chain_id 143
 }
 
 impl Network {
     pub fn from_env() -> Self {
         match std::env::var("NETWORK").as_deref() {
+            Ok("monad") => {
+                tracing::info!("🟣 Network: MONAD MAINNET — chain 143");
+                Network::Monad
+            }
             Ok("mainnet") => {
-                tracing::info!("🔴 Network: MAINNET — real funds");
+                tracing::info!("🔴 Network: ARBITRUM MAINNET — real funds");
                 Network::Mainnet
             }
             _ => {
@@ -41,6 +46,7 @@ impl Network {
         match self {
             Network::Testnet => 421_614,
             Network::Mainnet => 42_161,
+            Network::Monad   => 143,
         }
     }
 
@@ -48,6 +54,7 @@ impl Network {
         match self {
             Network::Testnet => "0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff".parse().unwrap(),
             Network::Mainnet => "0x794a61358D6845594F94dc1DB02A252b5b4814aD".parse().unwrap(),
+            Network::Monad   => Address::ZERO,
         }
     }
 
@@ -55,6 +62,7 @@ impl Network {
         let key = match self {
             Network::Testnet => "CONTRACT_ADDRESS_TESTNET",
             Network::Mainnet => "CONTRACT_ADDRESS_MAINNET",
+            Network::Monad   => "CONTRACT_ADDRESS_MONAD",
         };
         std::env::var(key)
             .unwrap_or_else(|_| panic!("{} not set in .env", key))
@@ -68,6 +76,7 @@ impl Network {
             // USDC.e (0xFF970...) is the deprecated bridged token — Aave holds no reserves.
             Network::Testnet => "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d".parse().unwrap(),
             Network::Mainnet => "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".parse().unwrap(),
+            Network::Monad   => std::env::var("USDC").unwrap_or_default().parse().unwrap_or(Address::ZERO),
         }
     }
 
@@ -75,6 +84,7 @@ impl Network {
         match self {
             Network::Testnet => "0xd30e2101a97dcbAeBCBC04F14C3f624E67A35165".parse().unwrap(), // Arbitrum Sepolia ETH/USD
             Network::Mainnet => "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612".parse().unwrap(), // Arbitrum One ETH/USD
+            Network::Monad   => Address::ZERO,
         }
     }
 
@@ -84,6 +94,7 @@ impl Network {
         match self {
             Network::Testnet => "0x0153002d20B96532C639313c2d54c3dA09109309".parse().unwrap(), // Sepolia USDC/USD (best-effort)
             Network::Mainnet => "0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3".parse().unwrap(), // Arbitrum One USDC/USD
+            Network::Monad   => Address::ZERO,
         }
     }
 
@@ -92,6 +103,7 @@ impl Network {
         match self {
             Network::Testnet => "0x0a023a3423D9b27A0BE48c768CCF2dD7877fEf5E".parse().unwrap(), // Sepolia USDT/USD (best-effort)
             Network::Mainnet => "0x3f3f5dF88dC9F13eac63DF89EC16ef6e7E25DdE7".parse().unwrap(), // Arbitrum One USDT/USD
+            Network::Monad   => Address::ZERO,
         }
     }
 
@@ -102,17 +114,19 @@ impl Network {
         match self {
             Network::Testnet => None,
             Network::Mainnet => "0xb17b674D9c5CB2e441F8e196a2f048A81355d031".parse().ok(), // Curve factory on Arbitrum One
+            Network::Monad   => None,
         }
     }
 
     pub fn is_mainnet(&self) -> bool {
-        matches!(self, Network::Mainnet)
+        matches!(self, Network::Mainnet | Network::Monad)
     }
 
     pub fn pools(&self) -> Vec<PoolConfig> {
         match self {
             Network::Mainnet => mainnet_pools(),
             Network::Testnet => testnet_pools(),
+            Network::Monad   => vec![],
         }
     }
 }
@@ -141,7 +155,7 @@ fn mainnet_pools() -> Vec<PoolConfig> {
     vec![
         PoolConfig {
             name:    "FRAX-USDC".into(),
-            address: "0x0c9b8A3FDECb9d5B218D02555a8BaF332e5b740d".parse().unwrap(),
+            address: "0xC9B8a3FDECB9D5b218d02555a8Baf332E5B740d5".parse().unwrap(),
             tokens: vec![
                 TokenConfig {
                     symbol:   "FRAX".into(),
@@ -150,8 +164,8 @@ fn mainnet_pools() -> Vec<PoolConfig> {
                     index:    0,
                 },
                 TokenConfig {
-                    symbol:   "USDC".into(),
-                    address:  "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".parse().unwrap(),
+                    symbol:   "USDC.e".into(),
+                    address:  "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8".parse().unwrap(),
                     decimals: 6,
                     index:    1,
                 },
@@ -204,8 +218,8 @@ fn mainnet_pools() -> Vec<PoolConfig> {
             address: "0x7f90122BF0700F9E7e1F688fe926940E8839F353".parse().unwrap(),
             tokens: vec![
                 TokenConfig {
-                    symbol:   "USDC".into(),
-                    address:  "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".parse().unwrap(),
+                    symbol:   "USDC.e".into(),
+                    address:  "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8".parse().unwrap(),
                     decimals: 6,
                     index:    0,
                 },
@@ -371,6 +385,7 @@ mod tests {
     fn test_network_chain_ids() {
         assert_eq!(Network::Testnet.chain_id(), 421_614);
         assert_eq!(Network::Mainnet.chain_id(), 42_161);
+        assert_eq!(Network::Monad.chain_id(), 143);
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub struct RouteGraph {
 }
 
 struct EdgeData {
+    from_token: Address,
     to_token:  Address,
     pool:      Address,
     pool_name: String,
@@ -60,6 +61,7 @@ impl RouteGraph {
 
                     // DFS adjacency list
                     adj.entry(from_tok).or_default().push(EdgeData {
+                        from_token: from_tok,
                         to_token:  to_tok,
                         pool:      pool.address,
                         pool_name: pool.name.clone(),
@@ -142,6 +144,7 @@ impl RouteGraph {
                     route.push(RouteHop {
                         pool:            edge.pool,
                         pool_name:       edge.pool_name.clone(),
+                        token_in:        edge.from_token,
                         token_in_index:  edge.i,
                         token_out_index: edge.j,
                         is_meta:         edge.is_meta,
@@ -157,6 +160,7 @@ impl RouteGraph {
             path.push(RouteHop {
                 pool:            edge.pool,
                 pool_name:       edge.pool_name.clone(),
+                token_in:        edge.from_token,
                 token_in_index:  edge.i,
                 token_out_index: edge.j,
                 is_meta:         edge.is_meta,
@@ -257,6 +261,7 @@ impl RouteGraph {
             hops.push(RouteHop {
                 pool:            edge.pool,
                 pool_name:       edge.pool_name.clone(),
+                token_in:        edge.from,
                 token_in_index:  edge.i,
                 token_out_index: edge.j,
                 is_meta:         edge.is_meta,
@@ -273,13 +278,14 @@ impl RouteGraph {
     }
 }
 
-/// Remove duplicate cycles (same pool set, different traversal order).
+/// Remove duplicate cycles (same directed traversal sequence).
 fn deduplicate_routes(routes: Vec<Vec<RouteHop>>) -> Vec<Vec<RouteHop>> {
-    let mut seen: HashSet<Vec<Address>> = HashSet::new();
+    let mut seen: HashSet<Vec<(Address, Address, i128, i128)>> = HashSet::new();
     routes.into_iter()
         .filter(|route| {
-            let mut key: Vec<Address> = route.iter().map(|h| h.pool).collect();
-            key.sort();
+            let key: Vec<(Address, Address, i128, i128)> = route.iter()
+                .map(|h| (h.pool, h.token_in, h.token_in_index, h.token_out_index))
+                .collect();
             seen.insert(key)
         })
         .collect()
@@ -298,21 +304,19 @@ mod tests {
 
     #[test]
     fn test_dedup_removes_same_pool_sets() {
-        // Create two routes with same pools but different order
         let pool_a = Address::from([1u8; 20]);
         let pool_b = Address::from([2u8; 20]);
 
         fn hop(pool: Address) -> RouteHop {
-            RouteHop { pool, pool_name: "".into(), token_in_index: 0,
+            RouteHop { pool, pool_name: "".into(), token_in: Address::ZERO, token_in_index: 0,
                 token_out_index: 1, is_meta: false, amount_in: 0, expected_out: 0 }
         }
 
         let routes = vec![
             vec![hop(pool_a), hop(pool_b)],
-            vec![hop(pool_b), hop(pool_a)],
             vec![hop(pool_a), hop(pool_b)],
         ];
         let deduped = deduplicate_routes(routes);
-        assert_eq!(deduped.len(), 1, "Same pool sets should be deduplicated");
+        assert_eq!(deduped.len(), 1, "Same directed routes should be deduplicated");
     }
 }

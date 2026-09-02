@@ -28,8 +28,8 @@ contract KingfisherArbTest is Test {
     // ─── Arbitrum One addresses ───────────────────────────────────────────────
     address constant AAVE_POOL      = 0x794a61358D6845594F94dc1DB02A252b5b4814aD;
 
-    // CRIT-02 fix: correct FRAX-USDC pool address (was 0xC9B8a3... — typo in first char)
-    address constant FRAX_USDC_POOL = 0x0c9b8A3FDECb9d5B218D02555a8BaF332e5b740d;
+    // Curve FRAXBP plain pool on Arbitrum One (FRAX + USDC.e)
+    address constant FRAX_USDC_POOL = 0xC9B8a3FDECB9D5b218d02555a8Baf332E5B740d5;
     address constant CRVUSD_USDC    = 0xec090cf6DD891D2d014beA6edAda6e05E025D93d;
     address constant CRVUSD_USDT    = 0x73aF1150F265419Ef8a5DB41908B700C32D49135;
     address constant TWOPOOL        = 0x7f90122BF0700F9E7e1F688fe926940E8839F353;
@@ -107,11 +107,11 @@ contract KingfisherArbTest is Test {
         address fakePool = makeAddr("fake-pool");
         KingfisherArb.Hop[] memory hops = new KingfisherArb.Hop[](2);
         hops[0] = KingfisherArb.Hop({
-            pool: fakePool, tokenInIndex: 0, tokenOutIndex: 1,
+            pool: fakePool, tokenIn: USDC, tokenInIndex: 0, tokenOutIndex: 1,
             isMetaPool: false, minAmountOut: 1
         });
         hops[1] = KingfisherArb.Hop({
-            pool: FRAX_USDC_POOL, tokenInIndex: 1, tokenOutIndex: 0,
+            pool: FRAX_USDC_POOL, tokenIn: FRAX, tokenInIndex: 1, tokenOutIndex: 0,
             isMetaPool: false, minAmountOut: 1
         });
         vm.expectRevert(abi.encodeWithSelector(KingfisherArb.PoolNotAllowed.selector, fakePool));
@@ -139,7 +139,7 @@ contract KingfisherArbTest is Test {
     function test_SingleHopReverts() public {
         KingfisherArb.Hop[] memory hops = new KingfisherArb.Hop[](1);
         hops[0] = KingfisherArb.Hop({
-            pool: FRAX_USDC_POOL, tokenInIndex: 0, tokenOutIndex: 1,
+            pool: FRAX_USDC_POOL, tokenIn: USDC, tokenInIndex: 0, tokenOutIndex: 1,
             isMetaPool: false, minAmountOut: 1
         });
         vm.expectRevert(abi.encodeWithSelector(KingfisherArb.InvalidRouteLength.selector, uint256(1)));
@@ -150,7 +150,7 @@ contract KingfisherArbTest is Test {
         KingfisherArb.Hop[] memory hops = new KingfisherArb.Hop[](5);
         for (uint256 i = 0; i < 5; i++) {
             hops[i] = KingfisherArb.Hop({
-                pool: FRAX_USDC_POOL, tokenInIndex: 0, tokenOutIndex: 1,
+                pool: FRAX_USDC_POOL, tokenIn: USDC, tokenInIndex: 0, tokenOutIndex: 1,
                 isMetaPool: false, minAmountOut: 1
             });
         }
@@ -161,11 +161,11 @@ contract KingfisherArbTest is Test {
     function test_ZeroFlashAmountReverts() public {
         KingfisherArb.Hop[] memory hops = new KingfisherArb.Hop[](2);
         hops[0] = KingfisherArb.Hop({
-            pool: FRAX_USDC_POOL, tokenInIndex: 0, tokenOutIndex: 1,
+            pool: FRAX_USDC_POOL, tokenIn: USDC, tokenInIndex: 0, tokenOutIndex: 1,
             isMetaPool: false, minAmountOut: 1
         });
         hops[1] = KingfisherArb.Hop({
-            pool: CRVUSD_USDC, tokenInIndex: 1, tokenOutIndex: 0,
+            pool: CRVUSD_USDC, tokenIn: CRVUSD_TOKEN, tokenInIndex: 1, tokenOutIndex: 0,
             isMetaPool: false, minAmountOut: 1
         });
         vm.expectRevert(KingfisherArb.ZeroAmount.selector);
@@ -237,6 +237,7 @@ contract KingfisherArbTest is Test {
         KingfisherArb.Hop[] memory hops = new KingfisherArb.Hop[](2);
         hops[0] = KingfisherArb.Hop({
             pool:         FRAX_USDC_POOL,
+            tokenIn:      USDC,
             tokenInIndex: 1,   // USDC in
             tokenOutIndex: 0,  // FRAX out
             isMetaPool:   false,
@@ -244,6 +245,7 @@ contract KingfisherArbTest is Test {
         });
         hops[1] = KingfisherArb.Hop({
             pool:         TWOPOOL,
+            tokenIn:      FRAX,
             tokenInIndex: 0,   // USDC in (2pool index 0)
             tokenOutIndex: 1,  // USDT out — simplification; adjust if route differs
             isMetaPool:   false,

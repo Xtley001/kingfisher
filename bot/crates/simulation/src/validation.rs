@@ -106,10 +106,16 @@ async fn eth_call_simulate(
                 let mut arr = [0u8; 16];
                 arr.copy_from_slice(&result[result.len()-16..]);
                 let profit_wei = u128::from_be_bytes(arr);
-                let profit_usd = profit_wei as f64 / 1e6; // USDC 6 decimals
+                let dec = if opp.flash_token == kingfisher_core::venues::arbitrum::crvusd_token()
+                    || opp.flash_token == kingfisher_core::venues::arbitrum::frax() {
+                    18
+                } else {
+                    6
+                };
+                let profit_usd = profit_wei as f64 / 10f64.powi(dec);
                 Ok(profit_usd)
             } else {
-                // Empty return — treat as zero profit (will trigger revert in live tx)
+                // Empty return — treat as zero profit
                 Ok(0.0)
             }
         }

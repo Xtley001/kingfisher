@@ -23,6 +23,13 @@ pub mod multicall;
 pub mod event_indexer;
 pub mod pool_discovery;
 pub mod chainlink_watch;
+pub mod adapter;
+pub mod arbitrum;
+pub mod monad;
+
+pub use adapter::{ChainAdapter, ChainEvent, SignedTx, StrategyId, TxReceipt, VenueEntry};
+pub use arbitrum::ArbitrumAdapter;
+pub use monad::MonadAdapter;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;

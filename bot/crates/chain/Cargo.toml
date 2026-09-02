@@ -9,6 +9,7 @@ kingfisher-scanner  = { path = "../scanner" }
 kingfisher-executor = { path = "../executor" }
 kingfisher-api      = { path = "../api" }
 kingfisher-edges    = { path = "../edges" }
+kingfisher-oracle-lag = { path = "../oracle_lag" }
 alloy.workspace     = true
 tokio.workspace     = true
 anyhow.workspace    = true

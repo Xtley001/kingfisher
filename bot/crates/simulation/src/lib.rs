@@ -146,44 +146,60 @@ fn arb_l1_data_fee_usd(route: &[kingfisher_core::types::RouteHop], eth_price: f6
 
 // ── Calldata builder (for validation eth_call) ────────────────────────────────
 
-/// Build `executeArb()` calldata for the validation `eth_call`.
-///
-/// The function selector is hardcoded here because the simulation crate cannot
-/// depend on the executor crate (circular dependency).
-///
-/// Signature: `executeArb(address,uint256,(address,int128,int128,bool,uint256)[],uint256)`
-/// Selector:  `0x37cd080e`
-///
-/// To re-verify: `cast sig "executeArb(address,uint256,(address,int128,int128,bool,uint256)[],uint256)"`
-///
-/// If the function signature changes in `KingfisherArb.sol`, update this selector.
-/// A mismatch causes validation eth_calls to always revert, triggering the divergence
-/// circuit breaker and auto-pausing the bot.
+// Compile-time ABI binding for executeArb calldata encoding in simulation validation.
+alloy::sol! {
+    struct Hop {
+        address pool;
+        address tokenIn;
+        int128  tokenInIndex;
+        int128  tokenOutIndex;
+        bool    isMetaPool;
+        uint256 minAmountOut;
+    }
+
+    function executeArb(
+        address flashToken,
+        uint256 flashAmount,
+        Hop[]   hops,
+        uint256 minProfit
+    ) external returns (uint256 netProfit);
+}
+
+/// ABI-encode executeArb() using compile-time sol! macro.
 pub fn calldata_for_validation(
     opp: &kingfisher_core::types::Opportunity,
 ) -> anyhow::Result<alloy::primitives::Bytes> {
     use alloy::primitives::{U256, Bytes};
+    use alloy::sol_types::SolCall;
 
-    let selector = [0x37u8, 0xcd, 0x08, 0x0e];
-    let mut data: Vec<u8> = selector.to_vec();
-    data.extend_from_slice(&[0u8; 12]);
-    data.extend_from_slice(opp.flash_token.as_slice());
-    data.extend_from_slice(&U256::from(opp.flash_amount).to_be_bytes::<32>());
-    data.extend_from_slice(&U256::from(128u64).to_be_bytes::<32>());
+    let hops: Vec<Hop> = opp.route.iter().map(|h| {
+        let min_out = if h.expected_out > 0 {
+            (h.expected_out as f64 * 0.995) as u128
+        } else if h.amount_in > 0 {
+            h.amount_in * 99 / 100
+        } else {
+            1
+        }.max(1);
+
+        Hop {
+            pool:          h.pool,
+            tokenIn:       h.token_in,
+            tokenInIndex:  h.token_in_index,
+            tokenOutIndex: h.token_out_index,
+            isMetaPool:    h.is_meta,
+            minAmountOut:  U256::from(min_out),
+        }
+    }).collect();
+
     let min_p = ((opp.simulated_profit_usd.unwrap_or(0.0) * 0.95) * 1e6) as u128;
-    data.extend_from_slice(&U256::from(min_p).to_be_bytes::<32>());
-    data.extend_from_slice(&U256::from(opp.route.len()).to_be_bytes::<32>());
-    for hop in &opp.route {
-        data.extend_from_slice(&[0u8; 12]);
-        data.extend_from_slice(hop.pool.as_slice());
-        let mut ib = [0u8; 32]; ib[16..].copy_from_slice(&hop.token_in_index.to_be_bytes());
-        let mut jb = [0u8; 32]; jb[16..].copy_from_slice(&hop.token_out_index.to_be_bytes());
-        let mut mb = [0u8; 32]; mb[31] = hop.is_meta as u8;
-        data.extend_from_slice(&ib);
-        data.extend_from_slice(&jb);
-        data.extend_from_slice(&mb);
-        let min_out = (hop.expected_out as f64 * 0.995) as u128;
-        data.extend_from_slice(&U256::from(min_out).to_be_bytes::<32>());
+
+    let calldata = executeArbCall {
+        flashToken:  opp.flash_token,
+        flashAmount: U256::from(opp.flash_amount),
+        hops,
+        minProfit:   U256::from(min_p),
     }
-    Ok(Bytes::from(data))
+    .abi_encode();
+
+    Ok(Bytes::from(calldata))
 }

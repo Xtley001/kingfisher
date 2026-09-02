@@ -144,8 +144,8 @@ pub async fn check_and_execute_withdrawal(
             hex::decode("17FC002b466eEc40DaE837Fc4bE5c67993ddBd6F").unwrap().try_into().unwrap(),
             hex::decode("498Bf2B1e120FeD3ad3D42EA2165E9b73f99C1e5").unwrap().try_into().unwrap(),
         ],
-        Network::Testnet => {
-            tracing::warn!("Withdrawal skipped on testnet — no token addresses configured");
+        Network::Testnet | Network::Monad => {
+            tracing::warn!("Withdrawal skipped on this network — no token addresses configured");
             state.write().await.pending_withdrawal = false;
             return Ok(());
         }

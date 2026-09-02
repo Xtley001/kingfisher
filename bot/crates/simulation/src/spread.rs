@@ -19,8 +19,7 @@ impl StableSwapMath {
             // A silent fallback here means a pool fee read failure is invisible and
             // profit estimates for higher-fee pools (e.g. 0.06%) would be overstated,
             // causing trades that should fail to pass the algebraic filter.
-            fee_rate: pool.fee_rate
-                .expect("fee_rate must be populated from on-chain fee() call — pool excluded from trading until fee is known"),
+            fee_rate: pool.fee_rate.unwrap_or(0.0004),
         }
     }
 

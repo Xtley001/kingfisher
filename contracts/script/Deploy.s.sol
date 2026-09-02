@@ -30,8 +30,8 @@ contract DeployMainnet is Script {
         // so the bot (hot wallet) can call executeArb(), while only the cold wallet
         // can withdraw profits, rotate operator, and update the allowlist.
         address[] memory initialPools = new address[](4);
-        // CRIT-02 fix: was 0xC9B8a3... (typo — C vs 0) — correct address is 0x0c9b8A3...
-        initialPools[0] = 0x0c9b8A3FDECb9d5B218D02555a8BaF332e5b740d; // FRAX-USDC
+        // Correct Curve FRAXBP plain pool on Arbitrum One (0xC9B8a3FDECB9D5b218d02555a8Baf332E5B740d5)
+        initialPools[0] = 0xC9B8a3FDECB9D5b218d02555a8Baf332E5B740d5; // FRAX-USDC.e (FRAXBP)
         initialPools[1] = 0xec090cf6DD891D2d014beA6edAda6e05E025D93d; // crvUSD-USDC
         initialPools[2] = 0x73aF1150F265419Ef8a5DB41908B700C32D49135; // crvUSD-USDT
         initialPools[3] = 0x7f90122BF0700F9E7e1F688fe926940E8839F353; // 2pool

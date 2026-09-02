@@ -169,17 +169,21 @@ async fn fetch_aave_status<P: Provider + Clone>(
     //   bit 57:    isPaused      — flash loans disabled if paused
     //   bits 80-115: borrowCap (in token units, 0 = uncapped)
     //
-    // A flash loan requires: isActive=1 AND isFrozen=0 AND isPaused=0.
+    // A flash loan requires: isActive=1 AND isFrozen=0 AND isPaused=0 AND flashloanEnabled=1.
+    // In Aave V3 ReserveConfigurationMap:
+    //   Bit 56: isActive
+    //   Bit 57: isFrozen
+    //   Bit 60: isPaused
+    //   Bit 63: flashLoanEnabled
     let flash_enabled = if result.len() >= 32 {
-        // Read the full 32-byte configuration bitmap (slot 0)
         let mut cfg_bytes = [0u8; 32];
         cfg_bytes.copy_from_slice(&result[0..32]);
-        // Convert to u256 via u128 pairs for bit extraction
         let cfg_lo = u128::from_be_bytes(cfg_bytes[16..32].try_into().unwrap());
-        let is_active = (cfg_lo & 0x1) != 0;
-        let is_frozen = (cfg_lo & 0x2) != 0;
-        let is_paused = (cfg_lo >> 57) & 0x1 != 0;
-        is_active && !is_frozen && !is_paused
+        let is_active = (cfg_lo >> 56) & 0x1 != 0;
+        let is_frozen = (cfg_lo >> 57) & 0x1 != 0;
+        let is_paused = (cfg_lo >> 60) & 0x1 != 0;
+        let flash_loan_enabled = (cfg_lo >> 63) & 0x1 != 0;
+        is_active && !is_frozen && !is_paused && flash_loan_enabled
     } else {
         false
     };
@@ -201,18 +205,31 @@ async fn fetch_aave_status<P: Provider + Clone>(
         u128::MAX / 2
     };
 
-    let liquidity = if result.len() >= 64 {
-        let mut arr = [0u8; 16];
-        arr.copy_from_slice(&result[48..64]);
-        u128::from_be_bytes(arr)
+    // Query real available cash liquidity: balanceOf(aTokenAddress) on the underlying asset.
+    // In Aave V3 ReserveData struct, aTokenAddress is at word 8 (bytes 256..288, address in 268..288).
+    let liquidity = if result.len() >= 288 {
+        let atoken = Address::from_slice(&result[268..288]);
+        let mut bal_call = vec![0x70, 0xa0, 0x82, 0x31]; // balanceOf(address)
+        bal_call.extend_from_slice(&[0u8; 12]);
+        bal_call.extend_from_slice(atoken.as_slice());
+        raw_call(provider, usdc, bal_call)
+            .await
+            .ok()
+            .filter(|r| r.len() >= 32)
+            .map(|r| {
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(&r[16..32]);
+                u128::from_be_bytes(arr)
+            })
+            .unwrap_or(25_000_000 * 1_000_000) // fallback 25M USDC
     } else {
-        0
+        25_000_000 * 1_000_000
     };
 
     if !flash_enabled {
         tracing::warn!(
             usdc = %usdc,
-            "Aave reserve not flash-borrowable (inactive, frozen, or paused) — bot will skip arbs"
+            "Aave reserve not flash-borrowable (inactive, frozen, paused, or flash disabled) — bot will skip arbs"
         );
     }
 
@@ -247,7 +264,7 @@ async fn fetch_aave_status<P: Provider + Clone>(
     })
 }
 
-async fn fetch_pool_states<P: Provider + Clone + Send + Sync + 'static>(
+pub async fn fetch_pool_states<P: Provider + Clone + Send + Sync + 'static>(
     provider: &Arc<P>,
     pools:    &[PoolConfig],
     block:    u64,
@@ -306,15 +323,15 @@ async fn fetch_one_pool<P: Provider + Clone>(
         .map(|r| { let mut a = [0u8; 16]; a.copy_from_slice(&r[16..32]); u128::from_be_bytes(a) })
         .unwrap_or(1_000_000_000_000_000_000u128);
 
-    // Read on-chain pool fee via fee() selector 0x90aaf60f (returns fee as 1e10 basis)
-    let fee_rate: Option<f64> = raw_call(provider, cfg.address, hex::decode("90aaf60f").unwrap())
+    // Read on-chain pool fee via fee() selector 0xddca3f43 (returns fee as 1e10 basis)
+    let fee_rate: Option<f64> = raw_call(provider, cfg.address, hex::decode("ddca3f43").unwrap())
         .await
         .ok()
         .filter(|r| r.len() >= 32)
         .map(|r| {
-            let mut a = [0u8; 4];
-            a.copy_from_slice(&r[28..32]);
-            let fee_raw = u32::from_be_bytes(a);
+            let mut a = [0u8; 8];
+            a.copy_from_slice(&r[24..32]);
+            let fee_raw = u64::from_be_bytes(a);
             fee_raw as f64 / 1e10 // Curve stores fee as integer / 1e10
         });
 

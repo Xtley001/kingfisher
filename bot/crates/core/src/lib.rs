@@ -2,6 +2,7 @@
 pub mod config;
 pub mod state;
 pub mod types;
+pub mod venues;
 
 pub use config::{Network, BotParams, PoolConfig, TokenConfig};
 pub use state::{BotState, GasRegime};

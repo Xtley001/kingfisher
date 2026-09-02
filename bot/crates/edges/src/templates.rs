@@ -151,7 +151,7 @@ fn make_template(
         eth_spent * eth_price
     };
     let (flash_amount, _route_flipped) = find_optimal_borrow_size_bidirectional(
-        &return_math, &math, i_ret, j_ret, aave_fee_bps as f64 / 100.0, aave_max, params.abs_cap_usd, template_gas_est,
+        &return_math, &math, i_ret, j_ret, aave_fee_bps as f64, aave_max, params.abs_cap_usd, template_gas_est,
     );
     if flash_amount == 0 { return None; }
 
@@ -169,25 +169,32 @@ fn make_template(
 
     let tok_flash = arb_pool.tokens.get(i_flash).map(|t| t.symbol.clone()).unwrap_or_default();
     let tok_cheap = arb_pool.tokens.get(j_cheap).map(|t| t.symbol.clone()).unwrap_or_default();
+    let cheap_dec = arb_pool.tokens.get(j_cheap).map(|t| t.decimals).unwrap_or(18);
+    let flash_dec = arb_pool.tokens.get(i_flash).map(|t| t.decimals).unwrap_or(6);
+
+    let mid_wei = (mid * 10f64.powi(cheap_dec as i32)) as u128;
+    let out_wei = (out * 10f64.powi(flash_dec as i32)) as u128;
 
     let route = vec![
         RouteHop {
             pool:            return_pool.map(|p| p.address).unwrap_or(arb_pool.address),
             pool_name:       ret_name.clone(),
+            token_in:        flash_addr,
             token_in_index:  i_ret as i128,
             token_out_index: j_ret as i128,
             is_meta:         return_pool.map(|p| p.is_meta).unwrap_or(arb_pool.is_meta),
             amount_in:       flash_amount,
-            expected_out:    (mid * 1e6) as u128,
+            expected_out:    mid_wei,
         },
         RouteHop {
             pool:            arb_pool.address,
             pool_name:       arb_pool.name.clone(),
+            token_in:        cheap_addr,
             token_in_index:  j_cheap as i128,
             token_out_index: i_flash as i128,
             is_meta:         arb_pool.is_meta,
-            amount_in:       (mid * 1e6) as u128,
-            expected_out:    flash_amount,
+            amount_in:       mid_wei,
+            expected_out:    out_wei,
         },
     ];
 

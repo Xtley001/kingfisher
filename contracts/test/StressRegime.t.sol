@@ -13,7 +13,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  */
 contract StressRegimeTest is Test {
     address constant AAVE_POOL   = 0x794a61358D6845594F94dc1DB02A252b5b4814aD;
-    address constant FRAX_USDC   = 0x0c9b8A3FDECb9d5B218D02555a8BaF332e5b740d;
+    address constant FRAX_USDC   = 0xC9B8a3FDECB9D5b218d02555a8Baf332E5B740d5;
     address constant CRVUSD_USDC = 0xec090cf6DD891D2d014beA6edAda6e05E025D93d;
     address constant CRVUSD_USDT = 0x73aF1150F265419Ef8a5DB41908B700C32D49135;
     address constant TWOPOOL     = 0x7f90122BF0700F9E7e1F688fe926940E8839F353;
