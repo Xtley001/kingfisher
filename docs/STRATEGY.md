@@ -1,104 +1,65 @@
-# Kingfisher — Strategy
+# Strategy Specification
 
-An honest description of what Kingfisher does, where its edge comes from, how it
-executes on Arbitrum, and what its limits are. Written for engineers and grant
-reviewers — no hype.
+_Technical analysis of Curve StableSwap arbitrage mechanics, latency dynamics, and structural edge sources on Arbitrum One._
 
----
+## Overview
 
-## The Trade
+Kingfisher captures pricing divergences between Curve StableSwap pools on Arbitrum One. When pool inventories become asymmetric, token exchange rates deviate from their target peg ratios. A single atomic transaction executes the following sequence:
 
-Kingfisher captures price discrepancies between Curve StableSwap pools on Arbitrum One.
-When two pools price the same pair of stablecoins slightly differently (because one is
-temporarily imbalanced), a single atomic transaction can:
+1. Flash-borrows stablecoins (USDC, USDT, FRAX, crvUSD) from **Balancer V2** at **0% fee**, falling back to **Aave V3** at **5 bps fee** when Balancer capacity is constrained.
+2. Executes a multi-hop swap route (1–4 hops) through the discounted pool into the premium pool.
+3. Repays the flash loan principal plus any borrowing fee.
+4. Enforces an on-chain profit condition via `require(netProfit >= minProfit)`.
 
-1. Flash-borrow stablecoins from Aave V3 (5 bps premium).
-2. Swap through the cheap pool, then the rich pool (2–4 hops).
-3. Repay Aave + premium, keep the spread.
+Because the transaction is atomic, any execution that yields insufficient net profit reverts. Losing races or miscalculated spreads forfeit only transaction gas; principal is never exposed to counterparty or market risk.
 
-The whole thing is one transaction guarded by `require(netProfit ≥ minProfit)`. If the
-spread doesn't cover the Aave premium **and** gas, the transaction reverts and the only
-cost is gas. **Principal is never at risk** — there are no held deposits and no way to
-finish the transaction at a loss.
+## Structural Edge Sources
 
----
+Plain two-pool stablecoin arbitrage during calm market regimes is highly saturated and competitive. Typical price spreads represent single-digit basis points that latency-optimized searchers close rapidly. Kingfisher's primary edge is engineered around **structural market stress**:
 
-## Where the Edge Actually Is
+| Trigger | Subsystem | Mechanism | Edge Characteristic |
+|---|---|---|---|
+| **Peg Stress** | `edges/src/peg_stress.rs` | Chainlink USDC/USD and USDT/USD deviations > 0.25% activate stress regime. | Widens spreads across secondary pools; sizing scales into millions via spread curve. |
+| **LLAMMA Cascades** | `edges/src/llamma.rs` | Soft-liquidations in Curve crvUSD lending markets push collateral into pools. | Predictable directional flow as ETH price crosses collateral liquidation bands. |
+| **LP Removals** | `edges/src/lp_removal.rs` | Large `RemoveLiquidity` events instantaneously deplete single-token reserves. | Creates momentary deep mispricings before passive rebalancing occurs. |
+| **Cross-Pool Cascades** | `edges/src/cascade.rs` | Severe imbalance in 2pool propagates to dependent meta-pools (FRAXBP, crvUSD). | Multi-hop triangular paths capture compounding divergence across dependent pools. |
+| **Gauge Vote Windows** | `edges/src/gauge_vote.rs` | Bi-weekly Curve DAO gauge emissions weight updates alter LP incentives. | Pre-positioning around anticipated liquidity shifts and LP reallocations. |
 
-Plain two-pool stablecoin arbitrage in calm markets is one of the most competitive
-niches in MEV. Spreads are single-digit basis points and are closed within the same
-block by many latency-optimized searchers. We do not pretend otherwise: **in calm
-markets, winnable, profitable trades are rare and fiercely contested.**
+During stress regimes, competition diminishes as generic bots fail risk checks or run out of uncollateralized borrow limits. Golden-section sizing automatically scales transaction volume to maximize profit capture without exceeding pool impact thresholds.
 
-The durable edge is **structural stress**, and the bot is built around detecting it:
+## Execution & Latency Architecture
 
-- **Peg stress** (`edges/peg_stress.rs`) — USDC/USDT depeg beyond 0.25% flips the bot
-  into stress regime: it scans all pools, resizes, and fires pre-built depeg templates.
-- **LLAMMA cascades** (`edges/llamma.rs`) — crvUSD soft-liquidations predictably tilt
-  crvUSD pools when ETH crosses band boundaries.
-- **Large LP removals** (`edges/lp_removal.rs`) — big `remove_liquidity` events create
-  transient imbalances.
-- **Cascade** (`edges/cascade.rs`) — a 2pool tilt often propagates to crvUSD pools.
-- **Gauge-vote windows** (`edges/gauge_vote.rs`) — weekly liquidity shifts around the
-  Thursday Curve gauge vote.
+Arbitrum One differs fundamentally from Ethereum L1 and PBS-governed rollups:
 
-These events produce larger, less-contested spreads. The realistic profit profile is:
-**small/occasional in calm markets, meaningful during stress events.** Sizing scales
-automatically with the opportunity (golden-section search + dual-leg impact gate), so a
-depeg can size into millions while a calm-market blip stays small.
+- **Single Sequencer & No Public Mempool**: Transactions route directly to the Offchain Labs Nitro sequencer. There is no public mempool for searchers to monitor or frontrun, and sandwich attacks cannot occur against atomic flash-loan transactions.
+- **First-Come-First-Served (FCFS)**: The sequencer processes transactions in order of receipt. Physical co-location and minimal network transport latency determine competitive outcome.
+- **Arbitrum Timeboost Express Lane**: Timeboost introduces a priority auction mechanism that grants express-lane sequencing rights (~200ms advantage). When configured via `TIMEBOOST_EXPRESS_LANE_URL`, Kingfisher routes high-value opportunities through priority channels rather than standard endpoints.
+- **Local IPC Connectivity**: Operating alongside a local Nitro node reduces block ingestion latency from 50–250 ms (over WebSocket) down to ~0.1 ms over Unix domain sockets, maximizing the computation budget before competing transactions land.
 
----
+## Sizing & Price Impact Dynamics
 
-## Execution and Latency
+Curve StableSwap pools follow an invariant that blends constant-sum and constant-product behavior:
 
-Arbitrum One has a **single centralized sequencer** and **no public mempool**:
+$$A \cdot n^n \sum x_i + D = A \cdot D \cdot n^n + \frac{D^{n+1}}{n^n \prod x_i}$$
 
-- There is **no Flashbots relay** and **no PBS** for Arbitrum. Submitting bundles to
-  `relay.flashbots.net` (an Ethereum-L1 service) does nothing for chain_id 42161.
-- There is **no one to sandwich** an atomic flash-loan arb, so a **private mempool is
-  neither necessary nor applicable**. Building one would solve a problem this strategy
-  does not have.
+As borrow volume $x$ increases, gross arbitrage yield increases linearly while marginal price impact increases non-linearly according to the amplification parameter $A$. Net profit $P(x)$ forms a strictly concave function:
 
-What matters instead is **latency and ordering priority**:
+$$P(x) = \text{Output}(x) - x - \text{LoanFee}(x) - \text{GasCost}$$
 
-1. **Broadcast** — the bot signs an EIP-1559 transaction and sends it via
-   `eth_sendRawTransaction` to the lowest-latency sequencer endpoint. Whichever copy the
-   sequencer sees first wins the FCFS race.
-2. **Co-location + IPC** — run on bare metal near the sequencer, ideally alongside a
-   local Nitro node (`--features ipc`, ~0.1ms block visibility vs 50–300ms over WS).
-3. **Timeboost** — Arbitrum's express-lane auction sells ~200ms of priority sequencing.
-   This is the Arbitrum-native way to *buy* first-in-line ordering during high-value
-   windows. Set `TIMEBOOST_EXPRESS_LANE_URL` to route through it.
+The sizing engine applies golden-section search over the interval $[x_{\min}, \text{ABS\_CAP\_USD}]$ to find the global maximum $x^*$ within 40–50 iterations (<300 µs), constrained by the dual-leg A-parameter gate to avoid excessive slippage.
 
-Cost note: on Arbitrum the dominant per-transaction cost is the **L1 calldata-posting
-fee**, not L2 execution gas. The profit model includes an L1 component (tuned by
-`L1_BASE_FEE_GWEI`) so marginal trades are not mispriced as profitable.
+## Authoritative On-Chain Accounting
 
----
+To prevent simulation drift or false accounting, Kingfisher decouples transaction dispatch from P&L recognition:
 
-## Profitability — The Honest View
+1. **Pending Dispatch**: Broadcast transactions remain unconfirmed until receipt ingestion.
+2. **Receipt Verification**: Upon inclusion (`receipt.status == 1`), the engine parses the emitted `ArbExecuted(address token, uint256 borrowAmount, uint256 grossOutput, uint256 gasUsed, uint256 netProfit)` event.
+3. **P&L Crediting**: Realized P&L is credited strictly from decoded on-chain logs, never from pre-flight simulation projections.
+4. **Failure Categorization**: Reverted transactions (`receipt.status == 0`) are decoded against custom error signatures (`ProfitBelowMin`, `NotBalancerVault`, `NotAavePool`, `PoolUnhealthy`). Competitive race losses (`ProfitBelowMin`) do not increment consecutive error counters.
 
-- **Downside is bounded.** Worst case per trade is wasted gas on a revert.
-- **Calm-market ceiling is modest and contested.** Do not expect steady high volume
-  between events.
-- **Stress events are the prize.** The edge monitors exist to catch them; that is where
-  the strategy earns its keep.
-- **Latency decides win rate.** A cloud host far from the sequencer will lose most races;
-  co-location + Timeboost is what makes the difference.
+## Ecosystem Role & Market Invariants
 
-The `PERFORMANCE.md` trade-frequency figures are model projections until validated on
-mainnet, and are labeled as such.
-
----
-
-## Grant Positioning
-
-Kingfisher is open-source Arbitrum MEV infrastructure that improves Curve price
-efficiency and reduces slippage for all users, especially during stress events.
-
-**Primary angle — Aave.** Kingfisher is a genuine, measurable flash-loan consumer:
-every trade borrows from Aave V3 and pays the 5 bps premium, generating protocol revenue
-for Aave LPs. The on-chain `ArbExecuted` event provides hard, auditable evidence of
-volume and cumulative premium paid. This is the most concrete grant pitch and should
-lead the application. Secondary angles: Arbitrum Foundation (ecosystem price efficiency)
-and infra credits (Alchemy, Tenderly). See LAUNCH_ROADMAP.md Phase 4.
+Kingfisher serves as an automated liquidity balancer across Arbitrum Curve pools:
+- **Price Efficiency**: By closing price discrepancies between plain pools and meta-pools, it maintains uniform exchange rates for retail and institutional traders.
+- **Flash Liquidity Utilization**: The protocol generates continuous fee revenue for uncollateralized lending providers (Aave V3 and Balancer V2 LPs).
+- **Zero Invariant Degradation**: All swaps respect Curve's virtual price sanity invariant (`virtual_price >= 1e18`), ensuring no trade interacts with compromised or drained pools.

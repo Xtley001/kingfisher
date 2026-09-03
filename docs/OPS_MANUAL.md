@@ -17,6 +17,35 @@ accumulates profits until the owner withdraws.
 
 ---
 
+## Infrastructure & Node Setup
+
+### Bare-Metal Environment
+- OS: Ubuntu 22.04 LTS or newer
+- Toolchains: Rust 1.80+ (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`), Foundry (`curl -L https://foundry.paradigm.xyz | bash && foundryup`)
+
+### Arbitrum Nitro Node (IPC Path)
+Running a local Nitro node provides IPC connectivity (~0.1ms vs 50–300ms for external RPC) and local mempool access for the Chainlink watcher.
+
+```bash
+# Clone and configure Nitro
+git clone https://github.com/OffchainLabs/nitro.git
+cd nitro
+# Follow official documentation: https://docs.arbitrum.io/run-arbitrum-node/overview
+# Configure IPC socket flag: --ipc-path=/run/nitro/arb.ipc
+```
+
+Configure `/etc/kingfisher/kingfisher.env`:
+```bash
+RPC_IPC_PATH=/run/nitro/arb.ipc
+```
+
+Compile with IPC feature flag:
+```bash
+cargo build --release --features ipc
+```
+
+---
+
 ## Daily Operations
 
 ### Status Check (30 seconds)

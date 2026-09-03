@@ -1,124 +1,112 @@
-# Kingfisher 🦅
+# Kingfisher
 
-Flash-loan arbitrage bot for Curve stablecoin pools on Arbitrum One.
+_Atomic flash-loan arbitrage and liquidation engine for Curve stablecoin pools on Arbitrum One._
 
 [![CI](https://github.com/Xtley001/kingfisher/actions/workflows/ci.yml/badge.svg)](https://github.com/Xtley001/kingfisher/actions)
-[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](./LICENSE)
-[![Network: Arbitrum One](https://img.shields.io/badge/network-Arbitrum%20One-2D374B)](https://arbiscan.io)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Network: Arbitrum One](https://img.shields.io/badge/network-Arbitrum%20One-2D374B.svg)](https://arbiscan.io)
+[![Rust](https://img.shields.io/badge/rust-1.80%2B-informational.svg)](https://www.rust-lang.org)
 
-Kingfisher borrows stablecoins from Balancer V2 (0% fee) or Aave V3 (5 bps fallback), captures the StableSwap price spread between two imbalanced Curve pools, and repays atomically in a single transaction. Every trade is guarded on-chain by `require(netProfit >= minProfit)` — a losing race reverts and costs only gas, so principal is never at risk. For the strategy, edge sources, execution model, and an honest profitability analysis, see the [strategy doc](./docs/STRATEGY.md).
-
-## Stack
-
-| Layer | Technology |
-|---|---|
-| On-chain | Solidity · Foundry · Balancer V2 · Aave V3 · Curve |
-| Bot engine | Rust · alloy-rs · tokio · rayon |
-| Dashboard | React 18 · TypeScript · Vite |
-| Hosting | Bare-metal (systemd) near the Arbitrum sequencer; dashboard on any static host |
-
-## How a trade works
-
-```mermaid
-flowchart LR
-    A[Scanner detects<br/>pool imbalance] --> B[Sizing engine<br/>optimal borrow]
-    B --> C[executeArb tx<br/>to sequencer]
-    C --> D[Balancer V2 / Aave V3<br/>flash loan]
-    D --> E[Curve swap route<br/>1-4 hops]
-    E --> F{netProfit ≥ minProfit?}
-    F -->|yes| G[Repay loan,<br/>keep spread]
-    F -->|no| H[Revert<br/>gas only]
-```
-
-Arbitrum has a single sequencer and no public mempool, so there is no Flashbots relay and nothing can sandwich an atomic arb. Kingfisher broadcasts a signed transaction straight to the lowest-latency sequencer endpoint; ordering priority comes from Arbitrum Timeboost, not private order flow. See [docs/STRATEGY.md](./docs/STRATEGY.md#execution-and-latency).
+Kingfisher captures StableSwap price discrepancies across Curve pools on Arbitrum One via uncollateralized flash loans. The engine prioritizes zero-fee borrowing via Balancer V2 with automated fallback to Aave V3 (5 bps). Every trade executes atomically in a single transaction guarded by on-chain profit validation (`require(netProfit >= minProfit)`); failing or uncompetitive trades revert and consume only gas, ensuring zero capital risk. For complete economic mechanics and execution details, see the [strategy specification](./docs/STRATEGY.md).
 
 ## Quickstart
 
-Build and run the bot against testnet:
-
 ```bash
-cp .env.example .env.testnet          # fill RPC_WS_URL, RPC_HTTP_URL, BOT_PRIVATE_KEY, ARBISCAN_KEY, API_KEY
+# Clone and configure
+git clone https://github.com/Xtley001/kingfisher.git
+cd kingfisher
+cp .env.example .env.testnet
+
+# Run bot engine on Arbitrum Sepolia testnet
 cd bot && NETWORK=testnet cargo run --bin kingfisher
+
+# Deploy contracts via Foundry (testnet)
+cd ../contracts && forge script script/DeployTestnet.s.sol --rpc-url $RPC_HTTP_URL --broadcast -vvvv
+
+# Start operator dashboard
+cd ../dashboard && npm install && npm run dev
 ```
-
-Deploy the contract (testnet first):
-
-```bash
-cd contracts
-forge install foundry-rs/forge-std --no-git
-forge install aave/aave-v3-core --no-git
-forge install OpenZeppelin/openzeppelin-contracts --no-git
-forge script script/DeployTestnet.s.sol --rpc-url $RPC_HTTP_URL --broadcast --verify -vvvv
-```
-
-Run the dashboard:
-
-```bash
-cd dashboard && npm install && npm run dev   # http://localhost:5173
-```
-
-## Production deployment
-
-Kingfisher runs on a dedicated/bare-metal server co-located near the Arbitrum sequencer, ideally alongside a local Nitro node for IPC (~0.1 ms block latency). Build with `cargo build --release --features ipc` and install the systemd unit in [`deploy/kingfisher.service`](./deploy/kingfisher.service). Secrets live only in `/etc/kingfisher/kingfisher.env` (`chmod 600`), never in the repo. The full sequenced checklist is in [`LAUNCH_ROADMAP.md`](./LAUNCH_ROADMAP.md).
 
 ## Architecture
 
-See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full system design. The bot is a Rust workspace:
-
 ```
 kingfisher/
-├── contracts/            Solidity — KingfisherArb.sol + Foundry tests
-├── bot/                  Rust workspace
+├── contracts/            # Solidity flash-loan arbitrageurs and Foundry tests
+├── bot/                  # Multi-crate asynchronous Rust searcher engine
+│   ├── bin/              # Binary entrypoint and execution coordinator
 │   └── crates/
-│       ├── core/         Shared types, config, state
-│       ├── chain/        Block loop (IPC/WS) + multicall state fetcher
-│       ├── scanner/      5-layer filter + route graph
-│       ├── simulation/   StableSwap math + optimal sizing + eth_call validation
-│       ├── edges/        Structural edge monitors (LLAMMA, peg stress, etc.)
-│       ├── executor/     Calldata builder + Arbitrum sequencer submission
-│       └── api/          Axum REST + WebSocket + Telegram alerts
-├── dashboard/            React 18 + TypeScript PWA
-└── deploy/               systemd unit for bare-metal deployment
+│       ├── core/         # Shared domain types, pool definitions, and in-memory state
+│       ├── chain/        # Local Nitro IPC / WebSocket block ingestion and event indexing
+│       ├── scanner/      # 5-layer opportunity filter and directed route graph
+│       ├── simulation/   # StableSwap analytical math, golden-section sizing, eth_call checks
+│       ├── edges/        # Structural edge monitors (LLAMMA, peg stress, cascade, LP exits)
+│       ├── executor/     # Calldata cache, presigned gas pool, and Timeboost routing
+│       └── api/          # Axum REST API, WebSocket streams, and Prometheus metrics
+├── dashboard/            # React 18, TypeScript, and Vite monitoring interface
+├── deploy/               # Systemd service unit for bare-metal co-location
+└── docs/                 # Extended system specifications and operational runbooks
 ```
 
-## Deployed contracts
+```mermaid
+flowchart LR
+    A[Scanner detects<br/>pool imbalance] --> B[Sizing engine<br/>golden-section]
+    B --> C[executeArb tx<br/>to sequencer]
+    C --> D[Balancer V2 0%<br/>Aave V3 5 bps fallback]
+    D --> E[Curve swap route<br/>1–4 hops]
+    E --> F{netProfit ≥ minProfit?}
+    F -->|yes| G[Repay loan,<br/>accumulate spread]
+    F -->|no| H[Revert<br/>gas cost only]
+```
 
-| Network | Contract | Address |
-|---|---|---|
-| Arbitrum One | `KingfisherArb` | `0x…` (filled after mainnet deploy) |
-| Arbitrum Sepolia | `KingfisherArb` | `0x…` (filled after testnet deploy) |
+Arbitrum One operates a single sequencer with no public mempool and first-come-first-served (FCFS) ordering, eliminating frontrunning and sandwich attacks. Kingfisher broadcasts transactions directly to the sequencer or through Arbitrum Timeboost express-lane auctions for sub-block priority sequencing. For detailed system design and performance specifications, see [ARCHITECTURE.md](./docs/ARCHITECTURE.md).
+
+## Supported Pools & Venues
+
+| Pool | Coins | Type | Flash Venue | Priority |
+|---|---|---|---|---|
+| `crvUSD-USDC` | crvUSD, USDC | Plain (2 coins) | Balancer V2 / Aave V3 | 1 (Active) |
+| `crvUSD-USDT` | crvUSD, USDT | Plain (2 coins) | Balancer V2 / Aave V3 | 1 (Active) |
+| `2pool` | USDC, USDT | Plain (2 coins) | Balancer V2 / Aave V3 | 1 (Active) |
+| `FRAX-USDC` | FRAX, USDC | Plain (2 coins) | Balancer V2 / Aave V3 | 1 (Active) |
 
 ## Configuration
 
-All configuration is via environment variables — see [`.env.example`](./.env.example) for the full list. Key parameters:
+All configuration is managed through environment variables — see [`.env.example`](./.env.example) for defaults:
 
 | Variable | Description | Default |
 |---|---|---|
-| `NETWORK` | `mainnet` or `testnet` | `testnet` |
-| `MIN_PROFIT_USD` | Absolute profit floor | `10` |
-| `MIN_GAS_ROI` | Minimum ROI multiple on gas | `3.0` |
-| `ABS_CAP_USD` | Maximum flash-loan size | `5000000` |
-| `L1_BASE_FEE_GWEI` | Ethereum L1 base fee for the Arbitrum L1 gas model | `10` |
-| `TIMEBOOST_EXPRESS_LANE_URL` | Optional Timeboost priority endpoint | — |
+| `NETWORK` | Execution environment (`testnet`, `mainnet`) | `testnet` |
+| `MIN_PROFIT_USD` | Absolute profit floor in USD | `10` |
+| `MIN_GAS_ROI` | Minimum return on gas multiple (e.g., 3.0 = 300%) | `3.0` |
+| `ABS_CAP_USD` | Flash-loan borrow ceiling | `5000000` |
+| `L1_BASE_FEE_GWEI` | Baseline Ethereum L1 fee for Arbitrum data costs | `10` |
+| `TIMEBOOST_EXPRESS_LANE_URL` | Optional Arbitrum Timeboost priority endpoint | — |
 
-Live parameters (profit floor, sizing cap) are tunable via the dashboard or `POST /params` without a restart.
+Runtime thresholds (such as profit floors and sizing ceilings) can be adjusted dynamically via the operator dashboard or `POST /params` without process restarts.
 
 ## Testing
 
 ```bash
-cd bot && cargo test --all                                # Rust unit tests
-cd contracts && forge test --fork-url $RPC_HTTP_URL -vvvv  # Foundry fork tests
+# Run full Rust workspace test suite
+cd bot && cargo test --all
+
+# Run contract unit and mainnet fork tests
+cd contracts && forge test -vvvv
 ```
 
-The full deploy and upgrade protocol is in [`docs/TESTING.md`](./docs/TESTING.md).
+For complete test protocols, local Anvil fork simulations, and pre-production verification checklists, see [TESTING.md](./docs/TESTING.md).
+
+## Operations
+
+For server deployment checklists, gas refill protocols, circuit breakers, and incident recovery runbooks, see the [Operations Manual](./docs/OPS_MANUAL.md).
 
 ## Security
 
-Every trade is bounded by an on-chain profit guard, and the contract separates a cold owner wallet from the hot operator wallet. Report vulnerabilities per the [security policy](./SECURITY.md). This code has not been independently audited — do not deploy significant capital without your own review.
+Every trade executes with an on-chain profit assertion (`require(netProfit >= minProfit)`), dual callback authentication (`IBalancerVault` / `IAavePool`), and strict separation between the operator hot wallet and cold owner address. Report vulnerabilities per our [security policy](./SECURITY.md). This software is unaudited — do not commit substantial capital without independent verification.
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for dev setup, the pool-approval process, and PR guidelines.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup, pool addition procedures, and PR guidelines.
 
 ## License
 
